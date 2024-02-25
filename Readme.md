@@ -6,11 +6,13 @@ This is a simple command-line interface (CLI) program written in Go that uses th
 
 - Fetches top 10 search results from Google Search.
 - Displays results in the terminal.
+- AI help
 
 ## Prerequisites
 
 - Go programming language installed on your machine.
 - A valid Google Search API key and Search Engine ID (CX).
+- Open AI API key
 
 ## Setup
 
@@ -41,8 +43,6 @@ To run the program, use the following command:
 ```bash
 ./main
 ```
-
-You will be prompted to enter a search query. After entering your query, press `Enter` to view the top 10 Google search results in your terminal.
 
 ## License
 
