@@ -3,7 +3,7 @@
 This is a simple command-line interface (CLI) program written in Go to interact with google search engine and Open AI.
 
 ## Features
-- Fetches top 10 search results from Google Search.
+- Fetches top 10 Google Search Results.
 - Fuzzy find the results and open link in browser.
 
 ![alt text](images/image.png)
