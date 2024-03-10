@@ -89,7 +89,7 @@ func handleInputMode() {
 }
 
 func handleInputCommand(command string) {
-	cmd := exec.Command(command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
