@@ -1,6 +1,6 @@
 # TRM Search
 
-This simple command-line interface (CLI) program written in Go interacts with Google's search engine and Open AI.
+CLI tool written in Go interacts with Google's search engine and Open AI.
 
 ## Features
 
