@@ -26,7 +26,6 @@ type GoogleResponse struct {
 	Items []Item `json:"items"`
 }
 
-// Replace with your actual key
 type ChatRequest struct {
 	Message string `json:"message"`
 }
@@ -67,9 +66,11 @@ func main() {
 
 func aiHelp() {
 	err := godotenv.Load()
+
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
+
 	fmt.Print("=============================\n")
 	fmt.Print("Welcome to the AI Help\n")
 	fmt.Print("=============================\n\n")
@@ -143,11 +144,11 @@ func search() {
 				searchResponse.Items[i].Title,
 				searchResponse.Items[i].Snippet,
 				searchResponse.Items[i].Link)
-		}))
+	}))
+
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("selected: %v\n", idx)
 
 	if idx != nil {
 		err := browser.OpenURL(searchResponse.Items[idx[0]].Link)
