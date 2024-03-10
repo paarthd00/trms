@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	"github.com/ktr0731/go-fuzzyfinder"
+	"github.com/pkg/browser"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -34,11 +36,11 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	fmt.Print("==============================================\n")
-	fmt.Print("Welcome to the Google Search Engine && AI Help\n")
-	fmt.Print("==============================================\n")
+	fmt.Print("=============================\n")
+	fmt.Print("Welcome to Trm Search \n")
+	fmt.Print("=============================\n")
 
-	reader := bufio.NewReader(os.Stdin) // For efficient input reading
+	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("What type of help do you need? \n")
@@ -46,17 +48,17 @@ func main() {
 		fmt.Print("2. AI Help\n")
 		fmt.Print("3. Exit\n")
 
-		input, _ := reader.ReadString('\n') // Read until newline
-		input = strings.TrimSpace(input)    // Remove leading/trailing whitespace
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
 
-		switch input { // Use input directly
+		switch input {
 		case "1":
 			search()
 		case "2":
 			aiHelp()
 		case "3":
 			fmt.Println("Exiting...")
-			return // Terminate the program
+			return
 		default:
 			fmt.Print("Invalid Option\n")
 		}
@@ -68,10 +70,11 @@ func aiHelp() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	fmt.Print("==============================================\n")
+	fmt.Print("=============================\n")
 	fmt.Print("Welcome to the AI Help\n")
-	fmt.Print("==============================================\n")
-	fmt.Print("Please enter your prompt\n")
+	fmt.Print("=============================\n\n")
+
+	fmt.Print("Please enter your prompt:: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	aiPrompt, _ := reader.ReadString('\n')
@@ -100,7 +103,7 @@ func aiHelp() {
 
 func search() {
 	fmt.Print("Search Query::")
-	// Read the search query from the user
+
 	reader := bufio.NewReader(os.Stdin)
 	searchQuery, _ := reader.ReadString('\n')
 	searchQuery = strings.Replace(searchQuery, " ", "+", -1)
@@ -124,6 +127,32 @@ func search() {
 		fmt.Printf("%d: %s - \n %s \n %s- \n", i+1, item.Title, item.Link, item.Snippet)
 		if i >= 9 {
 			break
+		}
+	}
+
+	idx, err := fuzzyfinder.FindMulti(
+		searchResponse.Items,
+		func(i int) string {
+			return searchResponse.Items[i].Title
+		},
+		fuzzyfinder.WithPreviewWindow(func(i, w, h int) string {
+			if i == -1 {
+				return ""
+			}
+			return fmt.Sprintf("Search Result: %s (%s)\nresult: %s",
+				searchResponse.Items[i].Title,
+				searchResponse.Items[i].Snippet,
+				searchResponse.Items[i].Link)
+		}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("selected: %v\n", idx)
+
+	if idx != nil {
+		err := browser.OpenURL(searchResponse.Items[idx[0]].Link)
+		if err != nil {
+			fmt.Println("Error opening browser:", err)
 		}
 	}
 }
