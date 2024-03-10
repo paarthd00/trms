@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -15,6 +16,16 @@ import (
 	"github.com/pkg/browser"
 	"github.com/sashabaranov/go-openai"
 )
+
+type Mode int
+
+const (
+	InputMode Mode = iota
+	SearchMode
+	AIMode
+)
+
+var currentMode Mode = InputMode
 
 type Item struct {
 	Title   string `json:"title"`
@@ -35,78 +46,64 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	fmt.Print("=============================\n")
+	fmt.Print("===================================================\n")
 	fmt.Print("Welcome to Trm Search \n")
-	fmt.Print("=============================\n")
+	fmt.Print("Type :s to search, :ai to chat with AI, :qa to quit\n")
+	fmt.Print("===================================================\n")
 
+	for {
+		switch currentMode {
+		case InputMode:
+			handleInputMode()
+		case SearchMode:
+			handleSearchMode()
+		case AIMode:
+			handleAIMode()
+		}
+	}
+
+}
+
+func handleInputMode() {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		fmt.Print("What type of help do you need? \n")
-		fmt.Print("1. Search for something\n")
-		fmt.Print("2. AI Help\n")
-		fmt.Print("3. Exit\n")
+		fmt.Print("> ")
 
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
-		switch input {
-		case "1":
-			search()
-		case "2":
-			aiHelp()
-		case "3":
-			fmt.Println("Exiting...")
+		if input == ":s" {
+			currentMode = SearchMode
 			return
-		default:
-			fmt.Print("Invalid Option\n")
+		} else if input == ":ai" {
+			currentMode = AIMode
+			return
+		} else if input == ":qa" {
+			fmt.Println("Exiting...")
+			os.Exit(0)
+		} else {
+			handleInputCommand(input)
 		}
 	}
 }
 
-func aiHelp() {
-	err := godotenv.Load()
-
+func handleInputCommand(command string) {
+	cmd := exec.Command(command)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		fmt.Println("Error executing command:", err)
 	}
-
-	fmt.Print("=============================\n")
-	fmt.Print("Welcome to the AI Help\n")
-	fmt.Print("=============================\n\n")
-
-	fmt.Print("Please enter your prompt:: ")
-
-	reader := bufio.NewReader(os.Stdin)
-	aiPrompt, _ := reader.ReadString('\n')
-
-	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
-
-	resp, err := client.CreateChatCompletion(
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model: openai.GPT3Dot5Turbo,
-			Messages: []openai.ChatCompletionMessage{
-				{
-					Role:    openai.ChatMessageRoleUser,
-					Content: aiPrompt,
-				},
-			},
-		},
-	)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("ChatCompletion response: %v\n", resp.Choices[0].Message.Content)
 }
 
-func search() {
+func handleSearchMode() {
 	fmt.Print("Search Query::")
 
 	reader := bufio.NewReader(os.Stdin)
 	searchQuery, _ := reader.ReadString('\n')
+
 	searchQuery = strings.Replace(searchQuery, " ", "+", -1)
 	searchQuery = strings.TrimSuffix(searchQuery, "\n")
 
@@ -144,7 +141,7 @@ func search() {
 				searchResponse.Items[i].Title,
 				searchResponse.Items[i].Snippet,
 				searchResponse.Items[i].Link)
-	}))
+		}))
 
 	if err != nil {
 		log.Fatal(err)
@@ -156,4 +153,42 @@ func search() {
 			fmt.Println("Error opening browser:", err)
 		}
 	}
+
+	handleInputMode()
+}
+
+func handleAIMode() {
+	err := godotenv.Load()
+
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	fmt.Print("Please enter your prompt:: ")
+
+	reader := bufio.NewReader(os.Stdin)
+	aiPrompt, _ := reader.ReadString('\n')
+
+	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
+
+	resp, err := client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT3Dot5Turbo,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: aiPrompt,
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("ChatCompletion response: %v\n", resp.Choices[0].Message.Content)
+
+	handleInputMode()
 }
