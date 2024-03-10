@@ -13,7 +13,7 @@ This simple command-line interface (CLI) program written in Go interacts with Go
   ![alt text](images/image-1.png)
 
 - AI help
-  `:ai` to enter AI help mode where you can ask for AI help.
+  `:ai` to enter AI help mode.
 
 - Normal Mode
   If not in search or AI mode, then by default the program is in normal mode and can be used as bash terminal.
