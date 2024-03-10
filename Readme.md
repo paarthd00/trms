@@ -25,6 +25,11 @@ Before running the program, you need to add your Google API Search Key and Searc
 
 Use your keys to create a new `.env` file based on the `.env.template`.
 
+[OpenAI API](https://platform.openai.com/api-keys)
+
+you can find `CX` and `GOOGLE_API_KEY` from
+[Google Custom Search](https://developers.google.com/custom-search/v1/overview#search_engine_id)
+
 ## Installation
 To install the program, run the following commands in your terminal:
 

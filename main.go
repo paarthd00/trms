@@ -109,7 +109,7 @@ func search() {
 	searchQuery = strings.Replace(searchQuery, " ", "+", -1)
 	searchQuery = strings.TrimSuffix(searchQuery, "\n")
 
-	apiURL := "https://www.googleapis.com/customsearch/v1?key=" + os.Getenv("API_KEY") + "&cx=" + os.Getenv("CX") + "&q=" + searchQuery
+	apiURL := "https://www.googleapis.com/customsearch/v1?key=" + os.Getenv("GOOGLE_API_KEY") + "&cx=" + os.Getenv("CX") + "&q=" + searchQuery
 	req, _ := http.NewRequest("GET", apiURL, nil)
 
 	res, err := http.DefaultClient.Do(req)
