@@ -1,13 +1,16 @@
-# Google Search CLI
+# TRM Search
 
 This is a simple command-line interface (CLI) program written in Go to interact with google search engine and Open AI.
 
 ## Features
 - Fetches top 10 search results from Google Search.
-- Displays results in the terminal.
-- Fuzzy Find the Result and open in browser
+- Fuzzy find the results and open link in browser.
+
+![alt text](images/image.png)
+
 - AI help
 
+![alt text](images/image-1.png)
 ## Prerequisites
 - Go programming language installed on your machine.
 - A valid Google Search API key and Search Engine ID (CX).
@@ -29,6 +32,7 @@ To install the program, run the following commands in your terminal:
 go mod download
 go build -o main
 ```
+
 
 This will download the necessary Go modules and build your program into an executable file named `main`.
 
