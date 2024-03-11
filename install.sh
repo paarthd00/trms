@@ -18,8 +18,8 @@
 
   current_shell=$(echo $SHELL | awk -F '/' '{print $NF}')
 
-  echo "alias my-trm-search='my-trm-search -envfile $PWD/.env'" >>~/."$current_shell"rc
+  echo "alias trms='trms -envfile $PWD/.env'" >>~/."$current_shell"rc
 
-  echo "my-trm-search installed successfully in $INSTALL_DIR"
+  echo "trms installed successfully in $INSTALL_DIR"
 
 } 2>/dev/null
