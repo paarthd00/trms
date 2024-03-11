@@ -40,7 +40,7 @@ you can find `CX` and `GOOGLE_API_KEY` from
 To install the program, run the following commands in your terminal:
 `./install.sh`
 
-This command will download the trms cli globally
+Then just source your .bashrc or .zshrc
 
 ## Usage
 
