@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -42,7 +43,11 @@ type ChatRequest struct {
 }
 
 func main() {
-	err := godotenv.Load()
+
+	envFilePtr := flag.String("envfile", ".env", "Path to the .env file")
+	flag.Parse()
+
+	err := godotenv.Load(*envFilePtr)
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
@@ -57,11 +62,22 @@ func main() {
 			handleInputMode()
 		case SearchMode:
 			handleSearchMode()
+			handleInputMode()
 		case AIMode:
 			handleAIMode()
+			handleInputMode()
 		}
 	}
+}
 
+func handleInputCommand(command string) {
+	cmd := exec.Command("bash", "-c", command)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("Error executing command:", err)
+	}
 }
 
 func handleInputMode() {
@@ -79,22 +95,12 @@ func handleInputMode() {
 		} else if input == ":ai" {
 			currentMode = AIMode
 			return
-		} else if input == ":qa" {
+		} else if input == ":q" {
 			fmt.Println("Exiting...")
 			os.Exit(0)
 		} else {
 			handleInputCommand(input)
 		}
-	}
-}
-
-func handleInputCommand(command string) {
-	cmd := exec.Command("bash", "-c", command)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		fmt.Println("Error executing command:", err)
 	}
 }
 
@@ -154,7 +160,6 @@ func handleSearchMode() {
 		}
 	}
 
-	handleInputMode()
 }
 
 func handleAIMode() {
@@ -190,5 +195,4 @@ func handleAIMode() {
 
 	fmt.Printf("ChatCompletion response: %v\n", resp.Choices[0].Message.Content)
 
-	handleInputMode()
 }

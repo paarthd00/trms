@@ -45,21 +45,19 @@ you can find `CX` and `GOOGLE_API_KEY` from
 ## Installation
 
 To install the program, run the following commands in your terminal:
+`./install.sh`
 
-```bash
-go mod download
-go build -o main
-```
-
-This will download the necessary Go modules and build your program into an executable file named `main`.
+This command will download the trms cli globally
 
 ## Usage
 
 To run the program, use the following command:
 
-```bash
-./main
+
 ```
+trms
+```
+
 
 ## License
 
