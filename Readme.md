@@ -2,7 +2,7 @@
 
 CLI tool written in Go interacts with Google's search engine and Open AI.
 
-![dashboard](images/image.png)
+![dashboard](images/dashboard.png)
 
 ## Features
 
