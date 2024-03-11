@@ -1,6 +1,6 @@
 # TRMS
 
-CLI tool written in Go interacts with Google's search engine and Open AI.
+Fuzzy Find Google Search Results, and get AI help with `trms`.
 
 ![dashboard](images/dashboard.png)
 
