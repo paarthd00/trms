@@ -2,23 +2,16 @@
 
 CLI tool written in Go interacts with Google's search engine and Open AI.
 
+![dashboard](images/image.png)
+
 ## Features
 
 - Help fetches top 10 Google Search Results.
 
-  ![alt text](images/image.png)
-
 - Fuzzy, find the results, and open the link in the browser.
-
-  ![alt text](images/image-1.png)
-
+  ![alt text](images/fuzzy.png)
 - AI help
   `:ai` to enter AI help mode.
-
-- Normal Mode
-  If not in search or AI mode, then by default the program is in normal mode and can be used as bash terminal.
-
-  ![alt text](images/image4.png)
 
 ## Prerequisites
 
@@ -53,11 +46,9 @@ This command will download the trms cli globally
 
 To run the program, use the following command:
 
-
 ```
 trms
 ```
-
 
 ## License
 

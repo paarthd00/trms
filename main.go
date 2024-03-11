@@ -53,7 +53,7 @@ func main() {
 	}
 	fmt.Print("===================================================\n")
 	fmt.Print("Welcome to Trm Search \n")
-	fmt.Print("Type :s to search, :ai to chat with AI, :qa to quit\n")
+	fmt.Print("Type :s to search, :ai to chat with AI, :q to quit\n")
 	fmt.Print("===================================================\n")
 
 	for {
@@ -194,5 +194,4 @@ func handleAIMode() {
 	}
 
 	fmt.Printf("ChatCompletion response: %v\n", resp.Choices[0].Message.Content)
-
 }
