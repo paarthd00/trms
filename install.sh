@@ -1,6 +1,5 @@
 #!/bin/bash
 {
-  # Check for prerequisites (Go, etc.)
   if ! command -v go &>/dev/null; then
     echo "Go is not installed. Please install Go from https://go.dev/doc/install"
     exit 1
@@ -14,11 +13,11 @@
 
   sudo chmod +x "$INSTALL_DIR/trms"
 
-  PWD=$(pwd)
-
   current_shell=$(echo $SHELL | awk -F '/' '{print $NF}')
 
-  echo "alias trms='trms -envfile $PWD/.env'" >>~/."$current_shell"rc
+  echo "alias trms='trms -envfile $(pwd)/.env'" >>~/."$current_shell"rc
+  
+  exec $SHELL
 
   echo "trms installed successfully in $INSTALL_DIR"
 
