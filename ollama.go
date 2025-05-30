@@ -153,10 +153,117 @@ func (om *OllamaManager) PullModel(model string) error {
 		Percent: 0,
 	}
 
+	// Try API method first, fallback to CLI if needed
+	err := om.pullModelWithAPI(model)
+	if err != nil {
+		// If API fails, try CLI method
+		return om.pullModelWithCLI(model)
+	}
+	return err
+}
+
+func (om *OllamaManager) pullModelWithAPI(model string) error {
+	payload := map[string]interface{}{
+		"name":   model,
+		"stream": true,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(om.pullContext, "POST", "http://localhost:11434/api/pull", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to pull model: %s", string(body))
+	}
+
+	// Parse streaming JSON responses
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		select {
+		case <-om.pullContext.Done():
+			return fmt.Errorf("pull cancelled")
+		default:
+		}
+
+		var response struct {
+			Status    string `json:"status"`
+			Digest    string `json:"digest"`
+			Total     int64  `json:"total"`
+			Completed int64  `json:"completed"`
+			Error     string `json:"error"`
+		}
+
+		if err := decoder.Decode(&response); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		if response.Error != "" {
+			return fmt.Errorf("pull error: %s", response.Error)
+		}
+
+		// Update progress
+		if om.pullProgress != nil {
+			om.pullProgress.Status = response.Status
+			
+			if response.Total > 0 {
+				percent := int((response.Completed * 100) / response.Total)
+				om.pullProgress.Percent = percent
+				om.pullProgress.Downloaded = formatBytes(response.Completed)
+				om.pullProgress.Total = formatBytes(response.Total)
+			}
+
+			// Handle different status messages
+			switch {
+			case strings.Contains(response.Status, "pulling manifest"):
+				om.pullProgress.Status = "Pulling manifest..."
+				om.pullProgress.Percent = 5
+			case strings.Contains(response.Status, "downloading"):
+				om.pullProgress.Status = fmt.Sprintf("Downloading %s", model)
+			case strings.Contains(response.Status, "verifying"):
+				om.pullProgress.Status = "Verifying sha256..."
+				om.pullProgress.Percent = 95
+			case strings.Contains(response.Status, "writing manifest"):
+				om.pullProgress.Status = "Writing manifest..."
+				om.pullProgress.Percent = 98
+			case strings.Contains(response.Status, "success"):
+				om.pullProgress.Status = "Download complete!"
+				om.pullProgress.Percent = 100
+			}
+		}
+	}
+
+	return nil
+}
+
+// Fallback method using CLI if API doesn't work
+func (om *OllamaManager) pullModelWithCLI(model string) error {
 	cmd := exec.CommandContext(om.pullContext, "ollama", "pull", model)
 	
-	// Get stdout pipe for progress tracking
+	// Get both stdout and stderr pipes for progress tracking
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return err
 	}
@@ -165,32 +272,64 @@ func (om *OllamaManager) PullModel(model string) error {
 		return err
 	}
 
-	// Parse progress output
-	scanner := bufio.NewScanner(stdout)
-	progressRegex := regexp.MustCompile(`(\d+\.?\d*)\s*([KMGT]?B)\s*/\s*(\d+\.?\d*)\s*([KMGT]?B)\s*(\d+%)`)
+	// Create a combined reader for both stdout and stderr
+	combined := io.MultiReader(stdout, stderr)
+	scanner := bufio.NewScanner(combined)
+
+	// Enhanced regex patterns for different progress formats
+	progressRegexes := []*regexp.Regexp{
+		regexp.MustCompile(`(\d+\.?\d*)\s*([KMGT]?B)\s*/\s*(\d+\.?\d*)\s*([KMGT]?B)\s*(\d+%)`),
+		regexp.MustCompile(`(\d+)%`),
+		regexp.MustCompile(`pulling.*(\d+)%`),
+		regexp.MustCompile(`downloading.*(\d+)%`),
+	}
 	
 	for scanner.Scan() {
 		line := scanner.Text()
 		
-		if matches := progressRegex.FindStringSubmatch(line); matches != nil {
-			downloaded := matches[1] + " " + matches[2]
-			total := matches[3] + " " + matches[4]
-			percentStr := matches[5]
-			
-			// Parse percentage
-			percentStr = strings.TrimSuffix(percentStr, "%")
-			if percent, err := strconv.Atoi(percentStr); err == nil {
-				om.pullProgress.Downloaded = downloaded
-				om.pullProgress.Total = total
-				om.pullProgress.Percent = percent
-				om.pullProgress.Status = fmt.Sprintf("Downloading %s", model)
+		// Try to parse progress from different formats
+		for _, regex := range progressRegexes {
+			if matches := regex.FindStringSubmatch(line); matches != nil {
+				if len(matches) >= 6 {
+					// Format: downloaded / total (percent)
+					downloaded := matches[1] + " " + matches[2]
+					total := matches[3] + " " + matches[4]
+					percentStr := strings.TrimSuffix(matches[5], "%")
+					
+					if percent, err := strconv.Atoi(percentStr); err == nil {
+						om.pullProgress.Downloaded = downloaded
+						om.pullProgress.Total = total
+						om.pullProgress.Percent = percent
+						om.pullProgress.Status = fmt.Sprintf("Downloading %s", model)
+					}
+				} else if len(matches) >= 2 {
+					// Format: just percent
+					percentStr := strings.TrimSuffix(matches[1], "%")
+					if percent, err := strconv.Atoi(percentStr); err == nil {
+						om.pullProgress.Percent = percent
+						om.pullProgress.Status = fmt.Sprintf("Downloading %s", model)
+					}
+				}
+				break
 			}
-		} else if strings.Contains(line, "pulling") {
+		}
+
+		// Handle status messages
+		if strings.Contains(line, "pulling") {
 			om.pullProgress.Status = "Pulling manifest..."
+			if om.pullProgress.Percent < 5 {
+				om.pullProgress.Percent = 5
+			}
 		} else if strings.Contains(line, "verifying") {
 			om.pullProgress.Status = "Verifying sha256..."
+			if om.pullProgress.Percent < 95 {
+				om.pullProgress.Percent = 95
+			}
 		} else if strings.Contains(line, "writing") {
 			om.pullProgress.Status = "Writing manifest..."
+			if om.pullProgress.Percent < 98 {
+				om.pullProgress.Percent = 98
+			}
 		} else if strings.Contains(line, "success") {
 			om.pullProgress.Status = "Download complete!"
 			om.pullProgress.Percent = 100
