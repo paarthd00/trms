@@ -1,4 +1,4 @@
-module github.com/paarthd00/trm-search
+module trms
 
 go 1.23.0
 
