@@ -381,11 +381,17 @@ func (om *OllamaManager) FetchAvailableModels() error {
 	return nil
 }
 
-func (om *OllamaManager) Chat(prompt string) (string, error) {
+// Enhanced chat method with context support
+func (om *OllamaManager) ChatWithContext(fullContext string) (string, error) {
 	payload := map[string]interface{}{
 		"model":  om.currentModel,
-		"prompt": prompt,
+		"prompt": fullContext,
 		"stream": false,
+		"options": map[string]interface{}{
+			"temperature": 0.7,
+			"top_p":       0.9,
+			"top_k":       40,
+		},
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -431,6 +437,12 @@ func (om *OllamaManager) Chat(prompt string) (string, error) {
 	}
 
 	return result.Response, nil
+}
+
+// Enhanced Chat method that uses ChatWithContext
+func (om *OllamaManager) Chat(prompt string) (string, error) {
+	// For simple prompts without context, use the enhanced method
+	return om.ChatWithContext(prompt)
 }
 
 type AvailableModel struct {

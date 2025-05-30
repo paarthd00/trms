@@ -25,6 +25,7 @@ const (
 	ChatMode
 	NewChatMode
 	ModelManagementMode
+	ChatListMode
 )
 
 type ModelItem struct {
@@ -293,12 +294,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 			case CommandMode:
 				m.mode = ChatMode
-				m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+				m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage, Ctrl+H: history)", m.ollama.GetCurrentModel())
 				return m, m.loadChatHistory()
 			case ChatMode:
 				if m.showingModels {
 					m.showingModels = false
-					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage, Ctrl+H: history)", m.ollama.GetCurrentModel())
 					m.input.Focus()
 				} else {
 					m.mode = CommandMode
@@ -311,14 +312,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyEsc:
 			switch m.mode {
-			case NewChatMode, ModelManagementMode:
+			case NewChatMode, ModelManagementMode, ChatListMode:
 				m.mode = CommandMode
 				m.input.Placeholder = "Type a command or press Tab for chat..."
 				m.input.Focus()
 			case ChatMode:
 				if m.showingModels {
 					m.showingModels = false
-					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage, Ctrl+H: history)", m.ollama.GetCurrentModel())
 					m.input.Focus()
 				} else {
 					m.mode = CommandMode
@@ -340,6 +341,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == ChatMode || m.mode == CommandMode {
 				m.mode = ModelManagementMode
 				return m, m.refreshModels()
+			}
+			
+		case tea.KeyCtrlH:
+			// Chat history (Ctrl+H)
+			if m.mode == ChatMode || m.mode == CommandMode {
+				m.mode = ChatListMode
+				return m, m.refreshChats()
 			}
 			
 		case tea.KeyCtrlS:
@@ -379,8 +387,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				case "c", "chat":
 					m.mode = ChatMode
-					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage, Ctrl+H: history)", m.ollama.GetCurrentModel())
 					return m, m.loadChatHistory()
+				case "stats", "info":
+					// Show current chat statistics
+					m.viewport.SetContent(m.showChatStats())
+					return m, nil
+				case "history", "h":
+					// Quick access to chat history
+					m.mode = ChatListMode
+					return m, m.refreshChats()
+				case "new":
+					// Quick new chat
+					m.mode = NewChatMode
+					return m, m.refreshInstalledModels()
 				default:
 					// Execute as shell command
 					return m, m.executeCommand(input)
@@ -406,6 +426,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
+			case ChatListMode:
+				// Select and load a chat session with full context
+				if item, ok := m.chatList.SelectedItem().(ChatSessionItem); ok {
+					m.mode = ChatMode
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage, Ctrl+H: history)", item.session.ModelName)
+					m.input.Focus()
+					return m, m.switchToChatSession(item.session.ID)
+				}
+
 			case ChatMode:
 				if m.showingModels {
 					// Quick model switch for current chat
@@ -417,7 +446,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						
 						m.ollama.SetCurrentModel(item.name)
 						m.showingModels = false
-						m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage)", item.name)
+						m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage, H: history)", item.name)
 						m.input.Focus()
 					}
 				} else {
@@ -527,7 +556,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ollama.SetCurrentModel(session.ModelName)
 			}
 			
-			m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage)", m.ollama.GetCurrentModel())
+			m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage, H: history)", m.ollama.GetCurrentModel())
 			m.input.Focus()
 			
 			// Load chat history for this session
@@ -581,6 +610,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only update model list for these modes
 		m.modelList, cmd = m.modelList.Update(msg)
 		cmds = append(cmds, cmd)
+	case ChatListMode:
+		// Update chat list for chat history mode
+		m.chatList, cmd = m.chatList.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -598,7 +631,7 @@ func (m model) View() string {
 	s.WriteString(title + "\n")
 
 	// Mode indicator
-	modes := []string{"Command", "Chat", "New Chat", "Model Management"}
+	modes := []string{"Command", "Chat", "New Chat", "Model Management", "Chat History"}
 	modeIndicators := []string{}
 	for i, modeName := range modes {
 		if i == int(m.mode) {
@@ -640,7 +673,7 @@ func (m model) View() string {
 	switch m.mode {
 	case CommandMode:
 		s.WriteString(m.input.View() + "\n")
-		s.WriteString(helpStyle.Render("Tab: Chat │ Ctrl+L: Models │ Enter: Run command │ 'c': Chat │ 'q': Quit") + "\n")
+		s.WriteString(helpStyle.Render("Tab: Chat │ Ctrl+L: Models │ Ctrl+H: History │ Enter: Run command │ 'c': Chat │ 'q': Quit") + "\n")
 		if m.commandOutput != "" {
 			s.WriteString("\n" + m.viewport.View())
 		}
@@ -684,15 +717,23 @@ func (m model) View() string {
 			}
 		}
 
+	case ChatListMode:
+		s.WriteString(titleStyle.Render("Chat History") + "\n")
+		s.WriteString(m.chatList.View() + "\n")
+		if len(m.chatList.Items()) == 0 {
+			s.WriteString(helpStyle.Render("No chat sessions found") + "\n")
+		}
+		s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Load chat │ ESC: Back") + "\n")
+
 	case ChatMode:
 		if m.showingModels {
 			s.WriteString(titleStyle.Render("Quick Model Switch") + "\n")
 			s.WriteString(m.modelList.View() + "\n")
 			s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Switch model │ ESC: Back to chat") + "\n")
 		} else {
-			s.WriteString(modelStyle.Render(fmt.Sprintf("Chat #%d | Model: %s", m.currentSessionID, m.ollama.GetCurrentModel())) + "\n")
+			s.WriteString(modelStyle.Render(fmt.Sprintf("Chat #%d | Model: %s | Messages: %d", m.currentSessionID, m.ollama.GetCurrentModel(), len(m.chatHistory))) + "\n")
 			s.WriteString(m.input.View() + "\n")
-			s.WriteString(helpStyle.Render("Ctrl+N: New chat │ Ctrl+S: Switch model │ Ctrl+L: Manage models │ Tab: Commands") + "\n")
+			s.WriteString(helpStyle.Render("Ctrl+N: New chat │ Ctrl+S: Switch model │ Ctrl+L: Manage models │ Ctrl+H: Chat history │ Tab: Commands") + "\n")
 			if m.viewport.TotalLineCount() > 0 {
 				s.WriteString("\n" + m.viewport.View())
 			}
@@ -705,6 +746,266 @@ func (m model) View() string {
 
 	return s.String()
 }
+
+// Enhanced chat context management methods
+
+func (m *model) loadChatHistory() tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return aiResponseMsg{
+				response: "Database not connected. Chat history unavailable.",
+				err:      nil,
+			}
+		}
+		
+		// Load ALL messages for the session to maintain full context
+		messages, err := m.db.GetMessages(m.currentSessionID, 0) // 0 = no limit
+		if err != nil {
+			return aiResponseMsg{
+				response: fmt.Sprintf("Error loading chat history: %v", err),
+				err:      nil,
+			}
+		}
+		
+		// Store messages in model for context
+		m.chatHistory = messages
+		
+		// Format chat history for display (show last 20 for UI)
+		displayMessages := messages
+		if len(messages) > 20 {
+			displayMessages = messages[len(messages)-20:] // Show last 20 messages
+		}
+		
+		if len(displayMessages) == 0 {
+			return aiResponseMsg{
+				response: "No previous messages in this chat. Start a new conversation!",
+				err:      nil,
+			}
+		}
+		
+		formattedHistory := m.formatChatHistoryFromMessages(displayMessages)
+		
+		return aiResponseMsg{
+			response: formattedHistory,
+			err:      nil,
+		}
+	}
+}
+
+func (m *model) formatChatHistoryFromMessages(messages []Message) string {
+	if len(messages) == 0 {
+		return "No messages to display."
+	}
+	
+	var content strings.Builder
+	
+	// Add context indicator
+	totalMessages := len(m.chatHistory)
+	displayCount := len(messages)
+	
+	if totalMessages > displayCount {
+		content.WriteString(helpStyle.Render(fmt.Sprintf("... showing last %d of %d messages ...", displayCount, totalMessages)))
+		content.WriteString("\n\n")
+	}
+	
+	for i, msg := range messages {
+		if i > 0 {
+			content.WriteString("\n")
+		}
+		
+		if msg.Role == "user" {
+			content.WriteString(userMessageStyle.Render("You:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		} else {
+			content.WriteString(assistantMessageStyle.Render("AI:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		}
+		content.WriteString("\n")
+	}
+	
+	return content.String()
+}
+
+func (m *model) performAI(prompt string) tea.Cmd {
+	return func() tea.Msg {
+		// Save user message to database first
+		if m.db.IsConnected() {
+			userMsg, err := m.db.SaveMessage(m.currentSessionID, "user", prompt)
+			if err == nil {
+				// Add to in-memory history
+				m.chatHistory = append(m.chatHistory, *userMsg)
+			}
+		}
+		
+		// Build conversation context for the AI
+		conversationContext := m.buildConversationContext(prompt)
+		
+		// Send full context to AI
+		response, err := m.ollama.ChatWithContext(conversationContext)
+		
+		// Save assistant response to database
+		if m.db.IsConnected() && err == nil {
+			assistantMsg, saveErr := m.db.SaveMessage(m.currentSessionID, "assistant", response)
+			if saveErr == nil {
+				// Add to in-memory history
+				m.chatHistory = append(m.chatHistory, *assistantMsg)
+			}
+		}
+		
+		return aiResponseMsg{
+			response: response,
+			err:      err,
+		}
+	}
+}
+
+func (m *model) buildConversationContext(currentPrompt string) string {
+	if len(m.chatHistory) == 0 {
+		return currentPrompt
+	}
+	
+	var context strings.Builder
+	
+	// Include recent conversation history (last 10 exchanges to avoid token limits)
+	recentHistory := m.chatHistory
+	if len(m.chatHistory) > 20 { // 20 messages = 10 exchanges
+		recentHistory = m.chatHistory[len(m.chatHistory)-20:]
+	}
+	
+	context.WriteString("Previous conversation:\n")
+	for _, msg := range recentHistory {
+		if msg.Role == "user" {
+			context.WriteString(fmt.Sprintf("User: %s\n", msg.Content))
+		} else {
+			context.WriteString(fmt.Sprintf("Assistant: %s\n", msg.Content))
+		}
+	}
+	
+	context.WriteString(fmt.Sprintf("\nUser: %s", currentPrompt))
+	
+	return context.String()
+}
+
+func (m *model) switchToChatSession(sessionID int) tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return aiResponseMsg{
+				response: "Database not connected",
+				err:      fmt.Errorf("database not connected"),
+			}
+		}
+		
+		// Get session details
+		session, err := m.db.GetChatSession(sessionID)
+		if err != nil {
+			return aiResponseMsg{
+				response: fmt.Sprintf("Error loading chat session: %v", err),
+				err:      err,
+			}
+		}
+		
+		// Update current session
+		m.currentSessionID = sessionID
+		m.ollama.SetCurrentModel(session.ModelName)
+		
+		// Load full chat history for context
+		messages, err := m.db.GetMessages(sessionID, 0) // Load ALL messages
+		if err != nil {
+			return aiResponseMsg{
+				response: fmt.Sprintf("Error loading chat history: %v", err),
+				err:      err,
+			}
+		}
+		
+		// Store in memory for context
+		m.chatHistory = messages
+		
+		// Format for display (last 15 messages)
+		displayMessages := messages
+		if len(messages) > 15 {
+			displayMessages = messages[len(messages)-15:]
+		}
+		
+		var response strings.Builder
+		response.WriteString(fmt.Sprintf("📝 Switched to: %s\n", session.Name))
+		response.WriteString(fmt.Sprintf("🤖 Model: %s\n", session.ModelName))
+		response.WriteString(fmt.Sprintf("📊 Total messages: %d\n\n", len(messages)))
+		
+		if len(displayMessages) > 0 {
+			response.WriteString("Recent conversation:\n")
+			response.WriteString("═══════════════════\n\n")
+			response.WriteString(m.formatChatHistoryFromMessages(displayMessages))
+		} else {
+			response.WriteString("No previous messages. Start a new conversation!")
+		}
+		
+		return aiResponseMsg{
+			response: response.String(),
+			err:      nil,
+		}
+	}
+}
+
+func (m *model) createNewChatWithModel(modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return newChatMsg{sessionID: 0, err: fmt.Errorf("database not connected")}
+		}
+
+		// Create more descriptive session name with timestamp
+		timestamp := time.Now().Format("Jan 2, 15:04")
+		sessionName := fmt.Sprintf("Chat with %s - %s", modelName, timestamp)
+		
+		session, err := m.db.CreateChatSession(sessionName, modelName)
+		if err != nil {
+			return newChatMsg{sessionID: 0, err: err}
+		}
+
+		return newChatMsg{sessionID: session.ID, err: nil}
+	}
+}
+
+func (m *model) showChatStats() string {
+	if !m.db.IsConnected() {
+		return "Database not connected"
+	}
+	
+	// Get current session info
+	session, err := m.db.GetChatSession(m.currentSessionID)
+	if err != nil {
+		return fmt.Sprintf("Error getting session info: %v", err)
+	}
+	
+	messageCount := len(m.chatHistory)
+	userMessages := 0
+	assistantMessages := 0
+	
+	for _, msg := range m.chatHistory {
+		if msg.Role == "user" {
+			userMessages++
+		} else {
+			assistantMessages++
+		}
+	}
+	
+	var stats strings.Builder
+	stats.WriteString(fmt.Sprintf("📊 Chat Statistics\n"))
+	stats.WriteString(fmt.Sprintf("Session: %s\n", session.Name))
+	stats.WriteString(fmt.Sprintf("Model: %s\n", session.ModelName))
+	stats.WriteString(fmt.Sprintf("Created: %s\n", session.CreatedAt.Format("Jan 2, 2006 at 15:04")))
+	stats.WriteString(fmt.Sprintf("Last updated: %s\n", session.UpdatedAt.Format("Jan 2, 2006 at 15:04")))
+	stats.WriteString(fmt.Sprintf("Total messages: %d\n", messageCount))
+	stats.WriteString(fmt.Sprintf("Your messages: %d\n", userMessages))
+	stats.WriteString(fmt.Sprintf("AI responses: %d\n", assistantMessages))
+	
+	return stats.String()
+}
+
+// Original methods (keeping existing functionality)
 
 func (m *model) checkOllama() tea.Cmd {
 	return func() tea.Msg {
@@ -900,27 +1201,6 @@ func (m *model) executeCommand(command string) tea.Cmd {
 	}
 }
 
-func (m *model) performAI(prompt string) tea.Cmd {
-	return func() tea.Msg {
-		// Save user message to database
-		if m.db.IsConnected() {
-			m.db.SaveMessage(m.currentSessionID, "user", prompt)
-		}
-		
-		response, err := m.ollama.Chat(prompt)
-		
-		// Save assistant response to database
-		if m.db.IsConnected() && err == nil {
-			m.db.SaveMessage(m.currentSessionID, "assistant", response)
-		}
-		
-		return aiResponseMsg{
-			response: response,
-			err:      err,
-		}
-	}
-}
-
 func (m *model) refreshChats() tea.Cmd {
 	return func() tea.Msg {
 		if !m.db.IsConnected() {
@@ -950,21 +1230,38 @@ func (m *model) updateChatList() {
 	m.chatList.SetItems(items)
 }
 
-func (m *model) loadChatHistory() tea.Cmd {
-	return func() tea.Msg {
-		if !m.db.IsConnected() {
-			return nil
-		}
-		
-		// Format chat history with rich text
-		formattedHistory := m.formatChatHistory()
-		
-		// Update viewport with formatted chat history
-		return aiResponseMsg{
-			response: formattedHistory,
-			err:      nil,
-		}
+func (m *model) formatChatHistory() string {
+	if !m.db.IsConnected() {
+		return ""
 	}
+	
+	messages, err := m.db.GetRecentMessages(m.currentSessionID, 10)
+	if err != nil {
+		return ""
+	}
+	
+	var content strings.Builder
+	
+	for i, msg := range messages {
+		if i > 0 {
+			content.WriteString("\n")
+		}
+		
+		if msg.Role == "user" {
+			content.WriteString(userMessageStyle.Render("You:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		} else {
+			content.WriteString(assistantMessageStyle.Render("AI:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		}
+		content.WriteString("\n")
+	}
+	
+	return content.String()
 }
 
 func (m *model) checkDatabase() tea.Cmd {
@@ -1140,40 +1437,6 @@ func (m *model) wrapText(text string, width int) string {
 	return result.String()
 }
 
-func (m *model) formatChatHistory() string {
-	if !m.db.IsConnected() {
-		return ""
-	}
-	
-	messages, err := m.db.GetRecentMessages(m.currentSessionID, 10)
-	if err != nil {
-		return ""
-	}
-	
-	var content strings.Builder
-	
-	for i, msg := range messages {
-		if i > 0 {
-			content.WriteString("\n")
-		}
-		
-		if msg.Role == "user" {
-			content.WriteString(userMessageStyle.Render("You:"))
-			content.WriteString("\n")
-			formattedContent := m.formatChatContent(msg.Content)
-			content.WriteString(messageContentStyle.Render(formattedContent))
-		} else {
-			content.WriteString(assistantMessageStyle.Render("AI:"))
-			content.WriteString("\n")
-			formattedContent := m.formatChatContent(msg.Content)
-			content.WriteString(messageContentStyle.Render(formattedContent))
-		}
-		content.WriteString("\n")
-	}
-	
-	return content.String()
-}
-
 func (m *model) pullModel(modelName string) tea.Cmd {
 	return tea.Batch(
 		func() tea.Msg {
@@ -1229,21 +1492,6 @@ func (m *model) refreshInstalledModels() tea.Cmd {
 		}
 		
 		return modelsRefreshedMsg{err: err}
-	}
-}
-
-func (m *model) createNewChatWithModel(modelName string) tea.Cmd {
-	return func() tea.Msg {
-		if !m.db.IsConnected() {
-			return newChatMsg{sessionID: 0, err: fmt.Errorf("database not connected")}
-		}
-
-		session, err := m.db.CreateChatSession(fmt.Sprintf("Chat with %s", modelName), modelName)
-		if err != nil {
-			return newChatMsg{sessionID: 0, err: err}
-		}
-
-		return newChatMsg{sessionID: session.ID, err: nil}
 	}
 }
 
