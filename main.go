@@ -1,90 +1,98 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
-	"net/url"
+	"os"
 	"os/exec"
+	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/pkg/browser"
 )
 
 type Mode int
 
 const (
-	InputMode Mode = iota
-	SearchMode
-	AIMode
-	CommandMode
-	ModelSelectMode
-	InstallMode
+	CommandMode Mode = iota
+	ChatMode
+	NewChatMode
+	ModelManagementMode
 )
 
-type SearchResult struct {
-	title       string
-	url         string
-	description string
-}
-
-func (s SearchResult) Title() string       { return s.title }
-func (s SearchResult) Description() string { return s.description }
-func (s SearchResult) FilterValue() string { return s.title }
-
 type ModelItem struct {
-	name     string
-	size     string
-	installed bool
+	name        string
+	description string
+	size        string
+	installed   bool
+	isSeparator bool
+	isHeader    bool
 }
 
 func (m ModelItem) Title() string {
-	status := "📦"
-	if m.installed {
-		status = "✅"
+	if m.isHeader {
+		return headerStyle.Render(fmt.Sprintf("━━━ %s ━━━", m.name))
 	}
-	return fmt.Sprintf("%s %s", status, m.name)
+	if m.isSeparator {
+		return separatorStyle.Render("────────────────────────────────────────")
+	}
+	
+	status := "📥"  // Download icon
+	if m.installed {
+		status = "✅"  // Installed icon
+	}
+	return fmt.Sprintf("%s %-25s %8s", status, m.name, m.size)
 }
 
 func (m ModelItem) Description() string {
-	if m.installed {
-		return fmt.Sprintf("Installed (%s)", m.size)
+	if m.isHeader || m.isSeparator {
+		return ""
 	}
-	return "Not installed - press Enter to pull"
+	return m.description
 }
 
-func (m ModelItem) FilterValue() string { return m.name }
+func (m ModelItem) FilterValue() string { 
+	if m.isHeader || m.isSeparator {
+		return ""
+	}
+	return m.name 
+}
 
 type model struct {
-	mode           Mode
-	input          textinput.Model
-	viewport       viewport.Model
-	searchResults  []SearchResult
-	list           list.Model
-	modelList      list.Model
-	width          int
-	height         int
-	commandOutput  string
-	err            error
-	quitting       bool
-	ollama         *OllamaManager
+	mode             Mode
+	input            textinput.Model
+	viewport         viewport.Model
+	modelList        list.Model
+	chatList         list.Model
+	width            int
+	height           int
+	commandOutput    string
+	err              error
+	quitting         bool
+	ollama           *OllamaManager
+	db               *DatabaseManager
+	pullingModel     string
+	pullProgress     int
+	currentSessionID int
+	chatHistory      []Message
+	showingModels    bool
+	dbSetupProgress  string
+	modelProgress    *PullProgress
+	showingProgress  bool
+	installedModels  []ModelItem
+	availableModels  []ModelItem
 }
 
 type commandFinishedMsg struct {
 	output string
 	err    error
-}
-
-type searchFinishedMsg struct {
-	results []SearchResult
-	err     error
 }
 
 type aiResponseMsg struct {
@@ -98,14 +106,56 @@ type ollamaInstalledMsg struct {
 	err error
 }
 
+type setupDatabaseMsg struct{}
+
+type databaseSetupMsg struct {
+	err error
+}
+
 type modelPulledMsg struct {
 	model string
 	err   error
 }
 
+type modelProgressMsg struct {
+	progress *PullProgress
+}
+
+type modelDeletedMsg struct {
+	model string
+	err   error
+}
+
+type pullCancelledMsg struct{}
+
+type newChatMsg struct {
+	sessionID int
+	err       error
+}
+
+type tickMsg struct{}
+
 type modelsRefreshedMsg struct {
 	err error
 }
+
+type chatsRefreshedMsg struct {
+	err error
+}
+
+type ChatSessionItem struct {
+	session ChatSession
+}
+
+func (c ChatSessionItem) Title() string {
+	return fmt.Sprintf("[%d] %s", c.session.ID, c.session.Name)
+}
+
+func (c ChatSessionItem) Description() string {
+	return fmt.Sprintf("Model: %s | Updated: %s", c.session.ModelName, c.session.UpdatedAt.Format("Jan 2, 15:04"))
+}
+
+func (c ChatSessionItem) FilterValue() string { return c.session.Name }
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -119,40 +169,90 @@ var (
 	modelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("86")).
 			Bold(true)
+
+	modeStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("62")).
+			Foreground(lipgloss.Color("230")).
+			Padding(0, 1)
+
+	headerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")).
+			Bold(true)
+
+	separatorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
+	// Rich text styles for AI responses
+	codeBlockStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252")).
+			Padding(1, 2).
+			Margin(1, 0)
+
+	inlineCodeStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("238")).
+			Foreground(lipgloss.Color("252")).
+			Padding(0, 1)
+
+	userMessageStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")).
+			Bold(true).
+			MarginTop(1).
+			MarginBottom(1)
+
+	assistantMessageStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("86")).
+			Bold(true).
+			MarginTop(1).
+			MarginBottom(1)
+
+	messageContentStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			MarginLeft(2)
 )
 
 func initialModel() model {
 	ti := textinput.New()
-	ti.Placeholder = "Enter command..."
+	ti.Placeholder = "Type a command or press Tab for AI..."
 	ti.Focus()
 	ti.CharLimit = 256
 
-	vp := viewport.New(80, 20)
+	vp := viewport.New(80, 25)
 	vp.SetContent("")
-
-	listItems := []list.Item{}
-	l := list.New(listItems, list.NewDefaultDelegate(), 80, 20)
-	l.Title = "Search Results"
-	l.SetShowHelp(false)
+	vp.Style = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2)
 
 	modelListItems := []list.Item{}
 	ml := list.New(modelListItems, list.NewDefaultDelegate(), 80, 20)
-	ml.Title = "Ollama Models"
+	ml.Title = "Available Models (/ to search)"
 	ml.SetShowHelp(false)
+	ml.SetFilteringEnabled(true)
+
+	chatListItems := []list.Item{}
+	cl := list.New(chatListItems, list.NewDefaultDelegate(), 80, 20)
+	cl.Title = "Chat Sessions (/ to search)"
+	cl.SetShowHelp(false)
+	cl.SetFilteringEnabled(true)
 
 	return model{
-		mode:      InputMode,
-		input:     ti,
-		viewport:  vp,
-		list:      l,
-		modelList: ml,
-		ollama:    NewOllamaManager(),
+		mode:             CommandMode,
+		input:            ti,
+		viewport:         vp,
+		modelList:        ml,
+		chatList:         cl,
+		ollama:           NewOllamaManager(),
+		db:               NewDatabaseManager(),
+		currentSessionID: 1, // Default session
+		chatHistory:      []Message{},
 	}
 }
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
+		m.checkDatabase(),
 		m.checkOllama(),
 	)
 }
@@ -165,24 +265,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 4
-		m.list.SetSize(msg.Width, msg.Height-4)
-		m.modelList.SetSize(msg.Width, msg.Height-4)
+		m.viewport.Width = msg.Width - 6  // Account for border and padding
+		m.viewport.Height = msg.Height - 8  // More space for content
+		m.modelList.SetSize(msg.Width, msg.Height-5)
+		m.chatList.SetSize(msg.Width, msg.Height-5)
 
 	case tea.KeyMsg:
 		// Handle Ollama installation prompt
-		if m.mode == InstallMode {
-			content := m.viewport.View()
-			if strings.Contains(content, "install Ollama") {
-				if msg.String() == "y" || msg.String() == "Y" {
-					m.viewport.SetContent("Installing Ollama... This may take a few minutes.")
-					return m, m.installOllama()
-				} else if msg.String() == "n" || msg.String() == "N" {
-					m.mode = InputMode
-					m.viewport.SetContent("")
-					return m, nil
-				}
+		if m.commandOutput != "" && strings.Contains(m.commandOutput, "install Ollama") {
+			if msg.String() == "y" || msg.String() == "Y" {
+				m.viewport.SetContent("Installing Ollama... This may take a few minutes.")
+				return m, m.installOllama()
+			} else if msg.String() == "n" || msg.String() == "N" {
+				m.commandOutput = ""
+				m.viewport.SetContent("")
+				return m, nil
 			}
 		}
 
@@ -191,99 +288,157 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 
-		case tea.KeyCtrlP:
-			if m.mode == AIMode {
-				return m, m.refreshModels()
+		case tea.KeyTab:
+			// Simple toggle between Command and Chat
+			switch m.mode {
+			case CommandMode:
+				m.mode = ChatMode
+				m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+				return m, m.loadChatHistory()
+			case ChatMode:
+				if m.showingModels {
+					m.showingModels = false
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					m.input.Focus()
+				} else {
+					m.mode = CommandMode
+					m.input.Placeholder = "Type a command or press Tab for chat..."
+				}
 			}
+			m.input.Reset()
+			m.input.Focus()
+			return m, nil
 
 		case tea.KeyEsc:
-			if m.mode != InputMode {
-				m.mode = InputMode
-				m.input.Reset()
+			switch m.mode {
+			case NewChatMode, ModelManagementMode:
+				m.mode = CommandMode
+				m.input.Placeholder = "Type a command or press Tab for chat..."
 				m.input.Focus()
-				m.input.Placeholder = "Enter command..."
-				return m, nil
+			case ChatMode:
+				if m.showingModels {
+					m.showingModels = false
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					m.input.Focus()
+				} else {
+					m.mode = CommandMode
+					m.input.Placeholder = "Type a command or press Tab for chat..."
+					m.input.Focus()
+				}
 			}
+			return m, nil
 
+		case tea.KeyCtrlN:
+			// Create new chat (Ctrl+N)
+			if m.mode == ChatMode {
+				m.mode = NewChatMode
+				return m, m.refreshInstalledModels()
+			}
+			
+		case tea.KeyCtrlL:
+			// Model management (Ctrl+L) - Changed from Ctrl+M to avoid conflict with Enter
+			if m.mode == ChatMode || m.mode == CommandMode {
+				m.mode = ModelManagementMode
+				return m, m.refreshModels()
+			}
+			
+		case tea.KeyCtrlS:
+			// Quick model switch in current chat (Ctrl+S)
+			if m.mode == ChatMode {
+				m.showingModels = true
+				return m, m.refreshInstalledModels()
+			}
+			
+		case tea.KeyCtrlG:
+			// Cancel model pull (Ctrl+G for "Go/Cancel")
+			if m.mode == ModelManagementMode && m.ollama.IsPulling() {
+				return m, m.cancelPull()
+			}
+			
+		case tea.KeyCtrlD:
+			// Delete models (Ctrl+D)
+			if m.mode == ModelManagementMode {
+				if item, ok := m.modelList.SelectedItem().(ModelItem); ok && item.installed && !item.isHeader && !item.isSeparator {
+					return m, m.deleteModel(item.name)
+				}
+			}
+			
 		case tea.KeyEnter:
 			switch m.mode {
-			case InputMode:
+			case CommandMode:
 				input := m.input.Value()
+				if input == "" {
+					return m, nil
+				}
 				m.input.Reset()
-
-				switch {
-				case input == ":s" || strings.HasPrefix(input, "search "):
-					m.mode = SearchMode
-					if strings.HasPrefix(input, "search ") {
-						query := strings.TrimPrefix(input, "search ")
-						return m, m.performSearch(query)
-					}
-					m.input.Placeholder = "Enter search query..."
-					return m, nil
-
-				case input == ":ai" || strings.HasPrefix(input, "ai "):
-					if !m.ollama.IsRunning() {
-						m.viewport.SetContent("Ollama is not running. Trying to start it...")
-						return m, m.startOllama()
-					}
-					
-					m.mode = AIMode
-					if strings.HasPrefix(input, "ai ") {
-						query := strings.TrimPrefix(input, "ai ")
-						m.viewport.SetContent("Thinking...")
-						return m, m.performAI(query)
-					}
-					m.input.Placeholder = fmt.Sprintf("Chat with %s...", m.ollama.GetCurrentModel())
-					return m, nil
-
-				case input == ":models":
-					return m, m.refreshModels()
-
-				case input == ":q" || input == "quit":
+				
+				// Simple shortcuts
+				switch input {
+				case "q", "quit", "exit":
 					m.quitting = true
 					return m, tea.Quit
-
+				case "c", "chat":
+					m.mode = ChatMode
+					m.input.Placeholder = fmt.Sprintf("Chat with %s (Ctrl+N: new, Ctrl+S: switch, Ctrl+L: manage)", m.ollama.GetCurrentModel())
+					return m, m.loadChatHistory()
 				default:
-					m.mode = CommandMode
+					// Execute as shell command
 					return m, m.executeCommand(input)
 				}
 
-			case SearchMode:
-				if m.list.FilterState() == list.Unfiltered && m.list.SelectedItem() != nil {
-					// Selecting a search result
-					if i, ok := m.list.SelectedItem().(SearchResult); ok {
-						browser.OpenURL(i.url)
+			case NewChatMode:
+				// Select model for new chat
+				if len(m.ollama.GetModels()) == 0 {
+					// No models installed, redirect to model management
+					m.mode = ModelManagementMode
+					return m, m.refreshModels()
+				}
+				if item, ok := m.modelList.SelectedItem().(ModelItem); ok && item.installed && !item.isHeader && !item.isSeparator {
+					return m, m.createNewChatWithModel(item.name)
+				}
+
+			case ModelManagementMode:
+				// Download/select models for management
+				if item, ok := m.modelList.SelectedItem().(ModelItem); ok && !item.isHeader && !item.isSeparator {
+					if !item.installed {
+						m.pullingModel = item.name
+						return m, m.pullModel(item.name)
+					}
+				}
+
+			case ChatMode:
+				if m.showingModels {
+					// Quick model switch for current chat
+					if item, ok := m.modelList.SelectedItem().(ModelItem); ok && item.installed && !item.isHeader && !item.isSeparator {
+						// Update model for current session in database
+						if m.db.IsConnected() {
+							m.db.UpdateChatSessionModel(m.currentSessionID, item.name)
+						}
+						
+						m.ollama.SetCurrentModel(item.name)
+						m.showingModels = false
+						m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage)", item.name)
+						m.input.Focus()
 					}
 				} else {
-					// Performing a new search
-					query := m.input.Value()
-					m.input.Reset()
-					return m, m.performSearch(query)
-				}
-
-			case AIMode:
-				prompt := m.input.Value()
-				if prompt == "" {
-					return m, nil
-				}
-				m.input.Reset()
-				m.viewport.SetContent("Thinking...")
-				return m, m.performAI(prompt)
-
-			case ModelSelectMode:
-				if item, ok := m.modelList.SelectedItem().(ModelItem); ok {
-					if !item.installed {
-						m.viewport.SetContent(fmt.Sprintf("Pulling %s model...", item.name))
-						return m, m.pullModel(item.name)
-					} else {
-						m.ollama.SetCurrentModel(item.name)
-						m.mode = AIMode
-						m.input.Placeholder = fmt.Sprintf("Chat with %s...", item.name)
+					// Chat message
+					prompt := m.input.Value()
+					if prompt == "" {
+						return m, nil
 					}
+					m.input.Reset()
+					
+					// Check if Ollama is running
+					if !m.ollama.IsRunning() {
+						m.viewport.SetContent("Starting Ollama...")
+						return m, m.startOllama()
+					}
+					
+					m.viewport.SetContent("Thinking...")
+					return m, m.performAI(prompt)
 				}
 			}
 		}
-
 
 	case commandFinishedMsg:
 		m.commandOutput = msg.output
@@ -292,82 +447,139 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commandOutput = fmt.Sprintf("Error: %v", msg.err)
 		}
 		m.viewport.SetContent(m.commandOutput)
-		m.mode = InputMode
-		m.input.Placeholder = "Enter command..."
-
-	case searchFinishedMsg:
-		if msg.err != nil {
-			m.err = msg.err
-			m.viewport.SetContent(fmt.Sprintf("Search error: %v", msg.err))
-			m.mode = InputMode
-		} else {
-			items := make([]list.Item, len(msg.results))
-			for i, r := range msg.results {
-				items[i] = r
-			}
-			m.list.SetItems(items)
-			m.searchResults = msg.results
-		}
 
 	case aiResponseMsg:
 		if msg.err != nil {
 			m.err = msg.err
 			m.viewport.SetContent(fmt.Sprintf("AI error: %v", msg.err))
 		} else {
-			m.viewport.SetContent(msg.response)
+			// Format the AI response with rich text
+			formattedResponse := m.formatChatContent(msg.response)
+			m.viewport.SetContent(formattedResponse)
 		}
 		m.viewport.GotoTop()
-		m.mode = AIMode
-		m.input.Placeholder = fmt.Sprintf("Chat with %s...", m.ollama.GetCurrentModel())
-		m.input.Focus()
+
+	case databaseSetupMsg:
+		if msg.err != nil {
+			m.commandOutput = fmt.Sprintf("Failed to setup database: %v\nSome features will be unavailable.", msg.err)
+			m.viewport.SetContent(m.commandOutput)
+		} else {
+			m.viewport.SetContent("Database setup successful! Connecting...")
+			return m, m.connectDatabase()
+		}
 
 	case ollamaInstalledMsg:
 		if msg.err != nil {
-			m.viewport.SetContent(fmt.Sprintf("Failed to install Ollama: %v", msg.err))
-			m.mode = InputMode
+			m.commandOutput = fmt.Sprintf("Failed to install Ollama: %v", msg.err)
+			m.viewport.SetContent(m.commandOutput)
 		} else {
 			m.viewport.SetContent("Ollama installed successfully! Starting service...")
 			return m, m.startOllama()
 		}
 
 	case modelPulledMsg:
+		m.pullingModel = ""
+		m.modelProgress = nil
+		m.showingProgress = false
 		if msg.err != nil {
 			m.viewport.SetContent(fmt.Sprintf("Failed to pull model: %v", msg.err))
 		} else {
 			m.ollama.SetCurrentModel(msg.model)
-			m.viewport.SetContent(fmt.Sprintf("Model %s pulled successfully!", msg.model))
+			m.viewport.SetContent(fmt.Sprintf("Model %s ready!", msg.model))
 			return m, m.refreshModels()
+		}
+
+	case modelProgressMsg:
+		m.modelProgress = msg.progress
+		m.showingProgress = true
+		// Continue tracking progress
+		return m, tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+			if progress := m.ollama.GetPullProgress(); progress != nil {
+				return modelProgressMsg{progress: progress}
+			}
+			return nil
+		})
+
+	case modelDeletedMsg:
+		if msg.err != nil {
+			m.viewport.SetContent(fmt.Sprintf("Failed to delete model %s: %v", msg.model, msg.err))
+		} else {
+			m.viewport.SetContent(fmt.Sprintf("Model %s deleted successfully!", msg.model))
+			return m, m.refreshModels()
+		}
+
+	case pullCancelledMsg:
+		m.pullingModel = ""
+		m.modelProgress = nil
+		m.showingProgress = false
+		m.viewport.SetContent("Model download cancelled.")
+		return m, m.refreshModels()
+
+	case newChatMsg:
+		if msg.err != nil {
+			m.viewport.SetContent(fmt.Sprintf("Failed to create new chat: %v", msg.err))
+		} else {
+			m.currentSessionID = msg.sessionID
+			m.mode = ChatMode
+			
+			// Get the session to set the correct model
+			if session, err := m.db.GetChatSession(msg.sessionID); err == nil {
+				m.ollama.SetCurrentModel(session.ModelName)
+			}
+			
+			m.input.Placeholder = fmt.Sprintf("Chat with %s (N: new, S: switch, L: manage)", m.ollama.GetCurrentModel())
+			m.input.Focus()
+			
+			// Load chat history for this session
+			return m, m.loadChatHistory()
+		}
+
+	case tickMsg:
+		if m.pullingModel != "" {
+			m.pullProgress++
+			spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			spinnerChar := spinner[m.pullProgress%len(spinner)]
+			m.viewport.SetContent(fmt.Sprintf("Pulling %s %s\nThis may take several minutes...", m.pullingModel, spinnerChar))
+			
+			// Continue the animation
+			return m, tea.Tick(time.Millisecond*150, func(t time.Time) tea.Msg {
+				return tickMsg{}
+			})
 		}
 
 	case modelsRefreshedMsg:
 		if msg.err == nil {
 			m.updateModelList()
 		}
-		if m.mode != ModelSelectMode {
-			m.mode = AIMode
-			m.input.Placeholder = fmt.Sprintf("Chat with %s...", m.ollama.GetCurrentModel())
+
+	case chatsRefreshedMsg:
+		if msg.err == nil {
+			m.updateChatList()
 		}
 	}
 
 	// Update components based on mode
 	switch m.mode {
-	case InputMode, SearchMode, AIMode:
+	case CommandMode:
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
-		if m.mode == AIMode {
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	case ChatMode:
+		if m.showingModels {
+			// Don't update input when showing models
+			m.modelList, cmd = m.modelList.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
+			// Update input and viewport for chat
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
 			m.viewport, cmd = m.viewport.Update(msg)
 			cmds = append(cmds, cmd)
 		}
-	case CommandMode, InstallMode:
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
-	case ModelSelectMode:
+	case NewChatMode, ModelManagementMode:
+		// Only update model list for these modes
 		m.modelList, cmd = m.modelList.Update(msg)
-		cmds = append(cmds, cmd)
-	}
-
-	if m.mode == SearchMode && len(m.searchResults) > 0 {
-		m.list, cmd = m.list.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -376,51 +588,115 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.quitting {
-		return "Thanks for using Trm Search!\n"
+		return "Goodbye! 👋\n"
 	}
 
 	var s strings.Builder
 
-	title := titleStyle.Render("🔍 Trm Search - Terminal Search & Local AI")
+	// Title
+	title := titleStyle.Render("🤖 Terminal AI & Command Runner")
 	s.WriteString(title + "\n")
 
+	// Mode indicator
+	modes := []string{"Command", "Chat", "New Chat", "Model Management"}
+	modeIndicators := []string{}
+	for i, modeName := range modes {
+		if i == int(m.mode) {
+			if m.mode == ChatMode && m.showingModels {
+				modeIndicators = append(modeIndicators, modeStyle.Render("Quick Switch"))
+			} else {
+				modeIndicators = append(modeIndicators, modeStyle.Render(modeName))
+			}
+		} else {
+			modeIndicators = append(modeIndicators, modeName)
+		}
+	}
+	s.WriteString(strings.Join(modeIndicators, " │ ") + "\n")
+	
+	// Status indicators
+	statusIndicators := []string{}
+	if m.dbSetupProgress != "" {
+		statusIndicators = append(statusIndicators, m.dbSetupProgress)
+	} else if m.db.IsConnected() {
+		statusIndicators = append(statusIndicators, "🗄️ DB Ready")
+	} else if m.db.IsPostgresRunning() {
+		statusIndicators = append(statusIndicators, "🗄️ DB Starting...")
+	} else {
+		statusIndicators = append(statusIndicators, "🗄️ DB Available")
+	}
+	
+	if m.ollama.IsRunning() {
+		statusIndicators = append(statusIndicators, "🤖 Ollama Ready")
+	} else {
+		statusIndicators = append(statusIndicators, "🤖 Ollama Available")
+	}
+	
+	if len(statusIndicators) > 0 {
+		s.WriteString(helpStyle.Render(strings.Join(statusIndicators, " │ ")) + "\n")
+	}
+	s.WriteString("\n")
+
+	// Main content
 	switch m.mode {
-	case InputMode:
-		help := helpStyle.Render("Commands: :s (search) | :ai (AI chat) | :models (manage models) | :q (quit) | or type any shell command")
+	case CommandMode:
 		s.WriteString(m.input.View() + "\n")
-		s.WriteString(help + "\n")
+		s.WriteString(helpStyle.Render("Tab: Chat │ Ctrl+L: Models │ Enter: Run command │ 'c': Chat │ 'q': Quit") + "\n")
 		if m.commandOutput != "" {
 			s.WriteString("\n" + m.viewport.View())
 		}
 
-	case SearchMode:
-		if len(m.searchResults) == 0 {
-			s.WriteString(m.input.View() + "\n")
-			s.WriteString(helpStyle.Render("Enter search query and press Enter (ESC to go back)") + "\n")
-		} else {
-			s.WriteString(m.list.View() + "\n")
-			s.WriteString(helpStyle.Render("↑/↓: Navigate | Enter: Open in browser | /: Filter | ESC: Back") + "\n")
-		}
-
-	case AIMode:
-		s.WriteString(modelStyle.Render(fmt.Sprintf("Model: %s", m.ollama.GetCurrentModel())) + "\n")
-		s.WriteString(m.input.View() + "\n")
-		s.WriteString(helpStyle.Render("Enter prompt (ESC: back | Ctrl+P: change model)") + "\n")
-		
-		if m.viewport.TotalLineCount() > 0 {
-			s.WriteString("\n" + m.viewport.View())
-		}
-
-	case ModelSelectMode:
+	case NewChatMode:
+		s.WriteString(titleStyle.Render("Select Model for New Chat") + "\n")
 		s.WriteString(m.modelList.View() + "\n")
-		s.WriteString(helpStyle.Render("↑/↓: Navigate | Enter: Select/Pull model | ESC: Back") + "\n")
+		if len(m.ollama.GetModels()) == 0 {
+			s.WriteString(helpStyle.Render("No models installed. Press ESC → L to download models") + "\n")
+		} else {
+			s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Create chat with model │ ESC: Back") + "\n")
+		}
 
-	case CommandMode:
-		s.WriteString("Executing command...\n")
-		s.WriteString(m.viewport.View())
+	case ModelManagementMode:
+		s.WriteString(titleStyle.Render("Model Management") + "\n")
+		s.WriteString(m.modelList.View() + "\n")
+		
+		// Show progress bar if downloading
+		if m.showingProgress && m.modelProgress != nil {
+			progress := m.modelProgress
+			progressBar := m.renderProgressBar(progress.Percent)
+			s.WriteString(fmt.Sprintf("\n📥 %s\n", progress.Status))
+			s.WriteString(fmt.Sprintf("%s %d%%", progressBar, progress.Percent))
+			if progress.Downloaded != "" && progress.Total != "" {
+				s.WriteString(fmt.Sprintf(" (%s / %s)", progress.Downloaded, progress.Total))
+			}
+			s.WriteString("\n")
+			s.WriteString(helpStyle.Render("Ctrl+G: Cancel download │ ESC: Back") + "\n")
+		} else {
+			// Show management options
+			if item, ok := m.modelList.SelectedItem().(ModelItem); ok {
+				if item.isHeader || item.isSeparator {
+					s.WriteString(helpStyle.Render("↑/↓: Navigate │ ESC: Back") + "\n")
+				} else if item.installed {
+					s.WriteString(helpStyle.Render("↑/↓: Navigate │ Ctrl+D: Delete │ ESC: Back") + "\n")
+				} else {
+					s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Download │ ESC: Back") + "\n")
+				}
+			} else {
+				s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Download │ Ctrl+D: Delete │ ESC: Back") + "\n")
+			}
+		}
 
-	case InstallMode:
-		s.WriteString(m.viewport.View() + "\n")
+	case ChatMode:
+		if m.showingModels {
+			s.WriteString(titleStyle.Render("Quick Model Switch") + "\n")
+			s.WriteString(m.modelList.View() + "\n")
+			s.WriteString(helpStyle.Render("↑/↓: Navigate │ Enter: Switch model │ ESC: Back to chat") + "\n")
+		} else {
+			s.WriteString(modelStyle.Render(fmt.Sprintf("Chat #%d | Model: %s", m.currentSessionID, m.ollama.GetCurrentModel())) + "\n")
+			s.WriteString(m.input.View() + "\n")
+			s.WriteString(helpStyle.Render("Ctrl+N: New chat │ Ctrl+S: Switch model │ Ctrl+L: Manage models │ Tab: Commands") + "\n")
+			if m.viewport.TotalLineCount() > 0 {
+				s.WriteString("\n" + m.viewport.View())
+			}
+		}
 	}
 
 	if m.err != nil {
@@ -433,8 +709,8 @@ func (m model) View() string {
 func (m *model) checkOllama() tea.Cmd {
 	return func() tea.Msg {
 		if !m.ollama.IsInstalled() {
-			m.mode = InstallMode
-			m.viewport.SetContent("Ollama is not installed. Would you like to install Ollama now? (y/n)")
+			m.commandOutput = "Ollama is not installed. Would you like to install Ollama now? (y/n)"
+			m.viewport.SetContent(m.commandOutput)
 		}
 		return nil
 	}
@@ -463,7 +739,7 @@ func (m *model) startOllama() tea.Cmd {
 		}
 		
 		return aiResponseMsg{
-			response: "Ollama started successfully! You can now chat.",
+			response: "Ollama started! You can now chat.",
 			err:      nil,
 		}
 	}
@@ -471,38 +747,56 @@ func (m *model) startOllama() tea.Cmd {
 
 func (m *model) refreshModels() tea.Cmd {
 	return func() tea.Msg {
-		m.mode = ModelSelectMode
-		err := m.ollama.RefreshModels()
+		// Fetch both installed and available models
+		err1 := m.ollama.RefreshModels()
+		err2 := m.ollama.FetchAvailableModels()
+		
+		var err error
+		if err1 != nil {
+			err = err1
+		} else if err2 != nil {
+			err = err2
+		}
+		
 		return modelsRefreshedMsg{err: err}
 	}
 }
 
 func (m *model) updateModelList() {
-	installedModels := m.ollama.GetModels()
-	installedMap := make(map[string]string)
-	
-	for _, model := range installedModels {
-		installedMap[model.Name] = model.Size
+	if m.mode == NewChatMode || (m.mode == ChatMode && m.showingModels) {
+		m.updateInstalledModelList()
+	} else {
+		m.updateFullModelList()
 	}
-	
+}
+
+func (m *model) updateInstalledModelList() {
+	installedModels := m.ollama.GetModels()
 	items := []list.Item{}
 	
-	// Show installed models first
-	for _, model := range installedModels {
+	if len(installedModels) == 0 {
+		// Show message when no models are installed
 		items = append(items, ModelItem{
-			name:      model.Name,
-			size:      model.Size,
-			installed: true,
+			name:        "No models installed",
+			description: "Go to Model Management (L) to download models",
+			size:        "",
+			installed:   false,
+			isHeader:    true,
 		})
-	}
-	
-	// Show popular models that aren't installed
-	for _, modelName := range PopularModels {
-		if _, exists := installedMap[modelName]; !exists {
+	} else {
+		// Add header
+		items = append(items, ModelItem{
+			name:     fmt.Sprintf("INSTALLED MODELS (%d)", len(installedModels)),
+			isHeader: true,
+		})
+		
+		// Add installed models
+		for _, model := range installedModels {
 			items = append(items, ModelItem{
-				name:      modelName,
-				size:      "N/A",
-				installed: false,
+				name:        model.Name,
+				description: "Ready to use",
+				size:        model.Size,
+				installed:   true,
 			})
 		}
 	}
@@ -510,14 +804,89 @@ func (m *model) updateModelList() {
 	m.modelList.SetItems(items)
 }
 
-func (m *model) pullModel(modelName string) tea.Cmd {
-	return func() tea.Msg {
-		err := m.ollama.PullModel(modelName)
-		return modelPulledMsg{
-			model: modelName,
-			err:   err,
+func (m *model) updateFullModelList() {
+	installedModels := m.ollama.GetModels()
+	installedMap := make(map[string]bool)
+	
+	// Create a map of installed models
+	for _, model := range installedModels {
+		// Store the exact name
+		installedMap[model.Name] = true
+	}
+	
+	items := []list.Item{}
+	installedItems := []ModelItem{}
+	availableItems := []ModelItem{}
+	
+	// Separate installed and available models
+	for _, modelInfo := range AllModels {
+		installed := false
+		
+		// For models without tags (like "llama2"), check if it exists as-is or with :latest
+		if !strings.Contains(modelInfo.Name, ":") {
+			installed = installedMap[modelInfo.Name] || installedMap[modelInfo.Name+":latest"]
+		} else {
+			// For models with specific tags (like "llama2:13b"), only check exact match
+			installed = installedMap[modelInfo.Name]
+		}
+		
+		// Create description with tags if available
+		description := modelInfo.Description
+		if len(modelInfo.Tags) > 0 {
+			description += " [" + strings.Join(modelInfo.Tags, ", ") + "]"
+		}
+		
+		modelItem := ModelItem{
+			name:        modelInfo.Name,
+			description: description,
+			size:        modelInfo.Size,
+			installed:   installed,
+		}
+		
+		if installed {
+			installedItems = append(installedItems, modelItem)
+		} else {
+			availableItems = append(availableItems, modelItem)
 		}
 	}
+	
+	// Build final list with headers and separators
+	if len(installedItems) > 0 {
+		// Add installed models header
+		items = append(items, ModelItem{
+			name:     fmt.Sprintf("INSTALLED MODELS (%d)", len(installedItems)),
+			isHeader: true,
+		})
+		
+		// Add installed models
+		for _, item := range installedItems {
+			items = append(items, item)
+		}
+		
+		// Add separator
+		items = append(items, ModelItem{
+			isSeparator: true,
+		})
+	}
+	
+	// Add available models header
+	items = append(items, ModelItem{
+		name:     fmt.Sprintf("AVAILABLE MODELS (%d)", len(availableItems)),
+		isHeader: true,
+	})
+	
+	// Add available models
+	for _, item := range availableItems {
+		items = append(items, item)
+	}
+	
+	// Convert to list.Item interface
+	listItems := make([]list.Item, len(items))
+	for i, item := range items {
+		listItems[i] = item
+	}
+	
+	m.modelList.SetItems(listItems)
 }
 
 func (m *model) executeCommand(command string) tea.Cmd {
@@ -531,19 +900,20 @@ func (m *model) executeCommand(command string) tea.Cmd {
 	}
 }
 
-func (m *model) performSearch(query string) tea.Cmd {
-	return func() tea.Msg {
-		results, err := duckDuckGoSearch(query)
-		return searchFinishedMsg{
-			results: results,
-			err:     err,
-		}
-	}
-}
-
 func (m *model) performAI(prompt string) tea.Cmd {
 	return func() tea.Msg {
+		// Save user message to database
+		if m.db.IsConnected() {
+			m.db.SaveMessage(m.currentSessionID, "user", prompt)
+		}
+		
 		response, err := m.ollama.Chat(prompt)
+		
+		// Save assistant response to database
+		if m.db.IsConnected() && err == nil {
+			m.db.SaveMessage(m.currentSessionID, "assistant", response)
+		}
+		
 		return aiResponseMsg{
 			response: response,
 			err:      err,
@@ -551,76 +921,330 @@ func (m *model) performAI(prompt string) tea.Cmd {
 	}
 }
 
-func duckDuckGoSearch(query string) ([]SearchResult, error) {
-	escapedQuery := url.QueryEscape(query)
-	searchURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&no_html=1&skip_disambig=1", escapedQuery)
+func (m *model) refreshChats() tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return chatsRefreshedMsg{err: fmt.Errorf("database not connected")}
+		}
+		
+		_, err := m.db.GetChatSessions()
+		return chatsRefreshedMsg{err: err}
+	}
+}
 
-	resp, err := http.Get(searchURL)
+func (m *model) updateChatList() {
+	if !m.db.IsConnected() {
+		return
+	}
+	
+	sessions, err := m.db.GetChatSessions()
 	if err != nil {
-		return nil, err
+		return
 	}
-	defer resp.Body.Close()
-
-	var data struct {
-		RelatedTopics []interface{} `json:"RelatedTopics"`
-		Results []struct {
-			Text     string `json:"Text"`
-			FirstURL string `json:"FirstURL"`
-		} `json:"Results"`
-		AbstractText string `json:"AbstractText"`
-		AbstractURL  string `json:"AbstractURL"`
+	
+	items := []list.Item{}
+	for _, session := range sessions {
+		items = append(items, ChatSessionItem{session: session})
 	}
+	
+	m.chatList.SetItems(items)
+}
 
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-
-	var results []SearchResult
-
-	if data.AbstractText != "" && data.AbstractURL != "" {
-		results = append(results, SearchResult{
-			title:       "Summary",
-			url:         data.AbstractURL,
-			description: data.AbstractText,
-		})
-	}
-
-	for _, r := range data.Results {
-		if r.Text != "" && r.FirstURL != "" {
-			results = append(results, SearchResult{
-				title:       r.Text,
-				url:         r.FirstURL,
-				description: r.Text,
-			})
+func (m *model) loadChatHistory() tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return nil
+		}
+		
+		// Format chat history with rich text
+		formattedHistory := m.formatChatHistory()
+		
+		// Update viewport with formatted chat history
+		return aiResponseMsg{
+			response: formattedHistory,
+			err:      nil,
 		}
 	}
+}
 
-	for _, topic := range data.RelatedTopics {
-		if topicMap, ok := topic.(map[string]interface{}); ok {
-			if text, ok := topicMap["Text"].(string); ok && text != "" {
-				if url, ok := topicMap["FirstURL"].(string); ok && url != "" {
-					results = append(results, SearchResult{
-						title:       text,
-						url:         url,
-						description: text,
-					})
-					if len(results) >= 10 {
-						break
-					}
-				}
+func (m *model) checkDatabase() tea.Cmd {
+	return func() tea.Msg {
+		// Check if database is already running
+		if m.db.IsPostgresRunning() {
+			// Try to connect
+			if err := m.db.Connect(); err == nil {
+				return nil // Database is ready
+			}
+		}
+
+		// Check if docker-compose.yml exists
+		if _, err := os.Stat("docker-compose.yml"); err != nil {
+			m.commandOutput = "Database configuration not found. Some features will be unavailable."
+			m.viewport.SetContent(m.commandOutput)
+			return nil
+		}
+
+		// Check if Docker is available
+		if !m.db.IsDockerInstalled() {
+			m.commandOutput = "Docker is required for database features but not installed. Some features will be unavailable."
+			m.viewport.SetContent(m.commandOutput)
+			return nil
+		}
+
+		// Automatically setup database
+		m.viewport.SetContent("Setting up PostgreSQL database for chat history...")
+		return m.setupDatabase()()
+	}
+}
+
+func (m *model) setupDatabase() tea.Cmd {
+	return func() tea.Msg {
+		// Update progress in steps
+		m.dbSetupProgress = "🗄️ Setting up PostgreSQL..."
+		err := m.db.SetupPostgres()
+		m.dbSetupProgress = ""
+		return databaseSetupMsg{err: err}
+	}
+}
+
+func (m *model) connectDatabase() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.db.Connect(); err != nil {
+			return databaseSetupMsg{err: err}
+		}
+		
+		// Load chat history after successful connection
+		return m.loadChatHistory()()
+	}
+}
+
+func (m *model) renderProgressBar(percent int) string {
+	width := 40
+	filled := int(float64(width) * float64(percent) / 100.0)
+	
+	bar := strings.Builder{}
+	bar.WriteString("│")
+	
+	for i := 0; i < width; i++ {
+		if i < filled {
+			bar.WriteString("█")
+		} else {
+			bar.WriteString("░")
+		}
+	}
+	
+	bar.WriteString("│")
+	return bar.String()
+}
+
+func (m *model) formatChatContent(content string) string {
+	if content == "" {
+		return ""
+	}
+
+	var result strings.Builder
+	lines := strings.Split(content, "\n")
+	
+	inCodeBlock := false
+	var codeBlockContent strings.Builder
+	
+	for i, line := range lines {
+		// Handle code blocks
+		if strings.HasPrefix(line, "```") {
+			if inCodeBlock {
+				// End code block
+				result.WriteString(codeBlockStyle.Render(codeBlockContent.String()))
+				result.WriteString("\n")
+				codeBlockContent.Reset()
+				inCodeBlock = false
+			} else {
+				// Start code block
+				inCodeBlock = true
+			}
+			continue
+		}
+		
+		if inCodeBlock {
+			codeBlockContent.WriteString(line)
+			if i < len(lines)-1 {
+				codeBlockContent.WriteString("\n")
+			}
+		} else {
+			// Handle inline code
+			line = m.formatInlineCode(line)
+			
+			// Wrap long lines
+			wrappedLine := m.wrapText(line, m.viewport.Width-4)
+			result.WriteString(wrappedLine)
+			if i < len(lines)-1 {
+				result.WriteString("\n")
 			}
 		}
 	}
-
-	if len(results) == 0 {
-		results = append(results, SearchResult{
-			title:       "No results found",
-			url:         fmt.Sprintf("https://duckduckgo.com/?q=%s", escapedQuery),
-			description: "Try searching on DuckDuckGo directly",
-		})
+	
+	// Handle unclosed code block
+	if inCodeBlock {
+		result.WriteString(codeBlockStyle.Render(codeBlockContent.String()))
 	}
+	
+	return result.String()
+}
 
-	return results, nil
+func (m *model) formatInlineCode(text string) string {
+	// Simple inline code detection with backticks
+	re := regexp.MustCompile("`([^`]+)`")
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		code := strings.Trim(match, "`")
+		return inlineCodeStyle.Render(code)
+	})
+}
+
+func (m *model) wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+	
+	var result strings.Builder
+	var currentLine strings.Builder
+	currentLength := 0
+	
+	for _, word := range words {
+		wordLength := utf8.RuneCountInString(word)
+		
+		// If adding this word would exceed the width, start a new line
+		if currentLength > 0 && currentLength+1+wordLength > width {
+			result.WriteString(currentLine.String())
+			result.WriteString("\n")
+			currentLine.Reset()
+			currentLength = 0
+		}
+		
+		if currentLength > 0 {
+			currentLine.WriteString(" ")
+			currentLength++
+		}
+		
+		currentLine.WriteString(word)
+		currentLength += wordLength
+	}
+	
+	if currentLine.Len() > 0 {
+		result.WriteString(currentLine.String())
+	}
+	
+	return result.String()
+}
+
+func (m *model) formatChatHistory() string {
+	if !m.db.IsConnected() {
+		return ""
+	}
+	
+	messages, err := m.db.GetRecentMessages(m.currentSessionID, 10)
+	if err != nil {
+		return ""
+	}
+	
+	var content strings.Builder
+	
+	for i, msg := range messages {
+		if i > 0 {
+			content.WriteString("\n")
+		}
+		
+		if msg.Role == "user" {
+			content.WriteString(userMessageStyle.Render("You:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		} else {
+			content.WriteString(assistantMessageStyle.Render("AI:"))
+			content.WriteString("\n")
+			formattedContent := m.formatChatContent(msg.Content)
+			content.WriteString(messageContentStyle.Render(formattedContent))
+		}
+		content.WriteString("\n")
+	}
+	
+	return content.String()
+}
+
+func (m *model) pullModel(modelName string) tea.Cmd {
+	return tea.Batch(
+		func() tea.Msg {
+			// Start progress tracking
+			return modelProgressMsg{progress: &PullProgress{
+				Model:   modelName,
+				Status:  "Initializing download...",
+				Percent: 0,
+			}}
+		},
+		func() tea.Msg {
+			// Do the actual pull in background
+			err := m.ollama.PullModel(modelName)
+			return modelPulledMsg{
+				model: modelName,
+				err:   err,
+			}
+		},
+	)
+}
+
+func (m *model) cancelPull() tea.Cmd {
+	return func() tea.Msg {
+		err := m.ollama.CancelPull()
+		if err != nil {
+			return pullCancelledMsg{} // Still return cancelled msg even if error
+		}
+		return pullCancelledMsg{}
+	}
+}
+
+func (m *model) deleteModel(modelName string) tea.Cmd {
+	return func() tea.Msg {
+		err := m.ollama.DeleteModel(modelName)
+		return modelDeletedMsg{
+			model: modelName,
+			err:   err,
+		}
+	}
+}
+
+func (m *model) refreshInstalledModels() tea.Cmd {
+	return func() tea.Msg {
+		// Refresh both installed and available models
+		err1 := m.ollama.RefreshModels()
+		err2 := m.ollama.FetchAvailableModels()
+		
+		var err error
+		if err1 != nil {
+			err = err1
+		} else if err2 != nil {
+			err = err2
+		}
+		
+		return modelsRefreshedMsg{err: err}
+	}
+}
+
+func (m *model) createNewChatWithModel(modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !m.db.IsConnected() {
+			return newChatMsg{sessionID: 0, err: fmt.Errorf("database not connected")}
+		}
+
+		session, err := m.db.CreateChatSession(fmt.Sprintf("Chat with %s", modelName), modelName)
+		if err != nil {
+			return newChatMsg{sessionID: 0, err: err}
+		}
+
+		return newChatMsg{sessionID: session.ID, err: nil}
+	}
 }
 
 func main() {
