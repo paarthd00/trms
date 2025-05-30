@@ -24,10 +24,10 @@ func NewDatabaseService() *DatabaseService {
 	return &DatabaseService{
 		config: models.DatabaseConfig{
 			Host:     "localhost",
-			Port:     5432,
-			User:     "trmuser",
-			Password: "trmpass",
-			Database: "trmdb",
+			Port:     5433,
+			User:     "trms",
+			Password: "trms_password",
+			Database: "trms",
 		},
 	}
 }
@@ -75,7 +75,7 @@ func (d *DatabaseService) IsConnected() bool {
 
 // IsPostgresRunning checks if PostgreSQL is running
 func (d *DatabaseService) IsPostgresRunning() bool {
-	cmd := exec.Command("docker", "ps", "--filter", "name=trms-postgres", "--format", "{{.Names}}")
+	cmd := exec.Command("docker", "ps", "--filter", "name=postgres", "--format", "{{.Names}}")
 	output, err := cmd.Output()
 	if err != nil {
 		return false

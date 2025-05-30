@@ -1,150 +1,168 @@
-# Trm - Terminal AI & Command Runner
+# TRMS - Terminal Resource Management Studio
 
-A beautiful terminal application that combines command execution with local AI chat using Ollama models - no API keys required!
-
-![dashboard](images/dashboard.png)
+A powerful terminal-based AI chat application with local model management using Ollama.
 
 ## Features
 
-- 🤖 **Local AI Chat**: Chat with 20+ AI models through Ollama
-- 📦 **Model Browser**: Browse and pull models with a beautiful interface
-- 💻 **Command Execution**: Run shell commands directly
-- 🗄️ **Persistent History**: Automatic PostgreSQL setup for chat history
-- 🚀 **Auto-Setup**: Ollama and PostgreSQL install automatically when needed
-- ⌨️ **Simple Navigation**: Just press Tab to switch modes
-- 🎨 **Beautiful TUI**: Clean interface with mode and status indicators
+- 🤖 **Local AI Chat** - Chat with AI models running locally via Ollama
+- 📦 **Model Management** - Browse, download, and manage AI models with real-time progress
+- 💾 **Chat History** - Persistent chat sessions stored in PostgreSQL
+- 📜 **Session Management** - Create, switch between, and manage multiple chat sessions
+- 📊 **Progress Tracking** - Real-time download progress with speed and ETA
+- 🎨 **Beautiful TUI** - Clean terminal interface with intuitive navigation
+- 🔄 **Auto-start Services** - Automatically starts Docker container and Ollama when needed
+- 🧹 **Download Management** - Resume interrupted downloads, clean partial files
 
-## Keyboard Navigation
+## Requirements
 
-- **Tab**: Toggle between Command and Chat modes
-- **Ctrl+N**: Create new chat (from chat mode)
-- **Ctrl+S**: Quick model switch (in active chat)
-- **Ctrl+M**: Model management (download/delete models)
-- **Ctrl+G**: Cancel download (during model pull)
-- **Ctrl+D**: Delete model (in model management)
-- **Enter**: Execute command / Send message / Select model
-- **ESC**: Return to command mode
-- **Ctrl+C**: Quit
-
-## Quick Commands
-
-In command mode, type:
-- `c` or `chat` - Switch to chat mode
-- `q` or `quit` - Exit
-- Any other text runs as a shell command
-
-## Available AI Models
-
-The model browser shows 100+ models including latest releases:
-
-| Model | Description | Size |
-|-------|-------------|------|
-| **llama3.2** | Meta's latest Llama 3.2 | 2.0GB |
-| **qwen2.5** | Alibaba's latest multilingual | 4.1GB |
-| **mistral-nemo** | Mistral's 12B model | 6.8GB |
-| **gemma2** | Google's enhanced Gemma 2 | 4.8GB |
-| **phi3** | Microsoft's compact power | 2.2GB |
-| **codellama** | Code generation specialist | 3.8GB |
-| **deepseek-coder** | Advanced coding model | 4.1GB |
-| **llava-llama3** | Vision + language model | 5.5GB |
-
-And 100+ more! Browse all models by pressing 'M' in chat mode.
+- Go 1.19+
+- Docker and Docker Compose
+- Ollama
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/paarthd00/trm-search.git
-cd trm-search
+git clone https://github.com/yourusername/trms.git
+cd trms
 
-# Install using the script
-./install.sh
+# Build the application
+go build -o trms cmd/trms/main.go
 
-# Or build manually
-go build -o trms
-sudo mv trms /usr/local/bin/
+# Run the application
+./trms
 ```
+
+The application will automatically:
+1. Check if Docker is installed
+2. Start the PostgreSQL container if not running
+3. Initialize the database schema
+4. Check if Ollama is running and attempt to start it
 
 ## Usage
 
-Start the application:
-```bash
-trms
-```
+### Key Bindings
 
-### Workflow Examples
+#### Global
+- **Tab** - Switch between Command and Chat modes
+- **Ctrl+M** - Open model management
+- **Ctrl+C** - Quit application
+- **ESC** - Return to command mode
 
-**Create New Chat:**
-1. Press Tab to enter chat mode, then 'N' for new chat
-2. Select from installed models (or press ESC → M to download models first)
-3. Start chatting with your chosen model
-4. All conversation history is automatically saved
+#### Chat Mode
+- **↑/↓** - Scroll through chat history
+- **v** - Select text
+- **Ctrl+Y** - Copy selected text
+- **g/G** - Jump to top/bottom of chat
+- **Enter** - Send message
+- **Ctrl+N** - Create new chat session
+- **Ctrl+S** - Switch model for current chat
+- **Ctrl+H** - View chat history
 
-**Quick Model Switch:**
-1. In an active chat, press 'S'
-2. Select a different installed model
-3. Continue the conversation with the new model
+#### Model Management
+- **↑/↓** - Navigate through model list
+- **Enter** - Download selected model
+- **d** - Delete installed model
+- **c** - Clean partial downloads
+- **r** - Restart failed downloads
+- **i** - View detailed model information
+- **ESC** - Return to previous mode
 
-**Download Models:**
-1. Press 'M' for model management
-2. Browse 100+ available models with fuzzy search
-3. Press Enter to download, watch real-time progress
-4. Press 'C' to cancel, 'D' to delete installed models
+### Command Mode
 
-**Run Commands:**
-1. Just type any command in command mode
-2. Press Enter to execute
+Type commands or shortcuts:
+- `chat` or `c` - Switch to chat mode
+- `models` or `m` - Open model management
+- `quit`, `q`, or `exit` - Exit application
+- Any other text - Execute as shell command
 
-## Enhanced Model Management
+### Chat Mode
 
-**🚀 Real-time Progress Tracking:**
-- Visual progress bars during downloads
-- Real-time speed and size information
-- Status updates (downloading, verifying, complete)
+- Chat with your selected AI model
+- All conversations are automatically saved to the database
+- Chat history persists between sessions
+- The model name is displayed in the mode indicator
+- If no model is selected, you'll be prompted to download one
 
-**⚡ Download Control:**
-- **Cancel**: Press 'C' to cancel active downloads
-- **Resume**: Restart interrupted downloads
-- **Multiple**: Queue multiple model downloads
+**Chat Session Management:**
+- **Create New Chat** (Ctrl+N): Start a fresh conversation with timestamp
+- **Switch Models** (Ctrl+S): Change models mid-conversation with context preserved
+- **View History** (Ctrl+H): Browse and switch between previous chat sessions
+- **Model Changes**: System messages track when models are switched within a chat
+- **Current Model Display**: Always shows which model is active in chat header
 
-**🗑️ Model Management:**
-- **Delete**: Press 'D' to remove installed models
-- **Status**: Clear icons (✅ installed, 📥 available)
-- **Sizes**: Accurate model sizes displayed
+### Model Management
 
-**🔍 Smart Search:**
-- Fuzzy search across 100+ models
-- Filter by type: `code`, `vision`, `chat`, `math`
-- Sort by size, popularity, or update date
+The model manager provides comprehensive model control:
 
-## How It Works
+**Features:**
+- Browse 20+ available Ollama models
+- Real-time system memory display
+- Memory requirement warnings for each model
+- Model status indicators:
+  - 🔴 Currently active model
+  - ✅ Installed and ready to use
+  - 📥 Available for download
+  - ⚠️ Partial download (can be cleaned)
+  - 🔄 Currently downloading
 
-1. **First Run**: Checks if PostgreSQL database and Ollama are available
-2. **Auto-Setup**: Offers to setup database and install Ollama if needed
-3. **Chat History**: All conversations automatically saved to database
-4. **Model Management**: Pull models on-demand
-5. **Local Processing**: Everything runs on your machine
+**Downloading Models:**
+- Press **Enter** to download a model (or switch to it if already installed)
+- Real-time progress bar with:
+  - Download percentage
+  - Current/Total size (e.g., 1.2GB/2.0GB)
+  - Download speed
+  - Time remaining estimate
+- Downloads can be resumed if interrupted
+- Multiple models can be queued for download
+- Progress tracking for each model in queue
+
+**Managing Models:**
+- **d** - Delete an installed model completely
+- **c** - Clean partial/corrupted downloads
+- **r** - Restart failed or interrupted downloads
+- **i** - View detailed model information (size, parameters, license, etc.)
+- **ESC** - Cancel current operation and return
+- **Model Selection**: Direct integration with chat mode for quick switching
+
+**Memory Management:**
+- Automatically checks if you have enough memory to run a model
+- Shows warnings for models that exceed available memory
+- Recommends smaller models if system resources are limited
+
+## Database Schema
+
+The application uses PostgreSQL with the following schema:
+- **chat_sessions** - Stores chat session metadata
+- **messages** - Stores all chat messages with timestamps
+- **model_feedback** - For future model performance tracking
+- **pgvector** - Enabled for future semantic search capabilities
+
+## Configuration
+
+Database configuration (automatically managed):
+- Host: localhost
+- Port: 5433 (mapped from container's 5432)
+- Database: trms
+- User: trms
+- Password: trms_password
 
 ## Troubleshooting
 
-**Ollama not starting?**
-```bash
-# Start manually
-ollama serve
+**Database not starting?**
+- Ensure Docker is installed and running
+- Check if port 5433 is available
+- The app will show connection errors but continue to run
 
-# Check installed models
-ollama list
-```
+**Ollama not working?**
+- The app will try to start Ollama automatically
+- If it fails, start Ollama manually: `ollama serve`
+- Check available models: `ollama list`
 
-**Want a specific model?**
-Just open the model browser (type `m`) and select it!
-
-## Development
-
-Built with:
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea) - Terminal UI
-- [Lipgloss](https://github.com/charmbracelet/lipgloss) - Styling
-- [Ollama](https://ollama.ai) - Local AI models
+**Model download fails?**
+- Check available disk space
+- Ensure you have sufficient memory for the model
+- Try cleaning partial downloads with 'c' in model management
 
 ## License
 

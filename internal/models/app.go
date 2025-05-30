@@ -18,6 +18,9 @@ const (
 	NewChatMode
 	ModelManagementMode
 	ChatListMode
+	ModelSelectionMode
+	ConfirmationMode
+	ModelInfoMode
 )
 
 // AppModel is the main application model
@@ -39,6 +42,14 @@ type AppModel struct {
 	ChatHistory      []Message
 	Quitting         bool
 	Error            error
+	
+	// Confirmation dialog
+	ConfirmationAction string
+	ConfirmationTarget string
+	
+	// Model info display
+	ModelInfoData interface{}
+	ModelInfoTarget string
 
 	// Managers
 	Ollama *OllamaManager
@@ -155,6 +166,15 @@ type (
 
 	PullCancelledMsg struct{}
 	TickMsg          struct{}
+	ProgressTickMsg  struct{
+		Model string
+	}
+	
+	ModelInfoMsg struct{
+		ModelName string
+		Info      interface{}
+		Err       error
+	}
 )
 
 // Init initializes the application model

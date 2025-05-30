@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,11 +25,29 @@ type ChatView struct {
 	selectStart   int
 	selectEnd     int
 	clipboardCopy string
+	copyButtons   []CopyButtonArea
+	lastCopied    int // Index of last copied message for feedback
+}
+
+// CopyButtonArea defines a clickable copy button area
+type CopyButtonArea struct {
+	MessageIndex int
+	X            int
+	Y            int
+	Width        int
+	Height       int
 }
 
 // GetMessages returns the messages (for external access)
 func (c *ChatView) GetMessages() []ChatMessage {
 	return c.messages
+}
+
+// ClearMessages clears all messages from the chat view
+func (c *ChatView) ClearMessages() {
+	c.messages = []ChatMessage{}
+	c.content = ""
+	c.updateContent()
 }
 
 // ChatMessage represents a single message in the chat
@@ -97,10 +116,11 @@ func NewChatView(width, height int) ChatView {
 	vp.MouseWheelEnabled = true
 
 	return ChatView{
-		viewport: vp,
-		messages: []ChatMessage{},
-		width:    width,
-		height:   height,
+		viewport:   vp,
+		messages:   []ChatMessage{},
+		width:      width,
+		height:     height,
+		lastCopied: -1, // Initialize to invalid index
 	}
 }
 
@@ -121,7 +141,8 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.width = msg.Width
 		c.height = msg.Height
 		c.viewport.Width = msg.Width
-		c.viewport.Height = msg.Height - 4 // Leave room for status
+		// Leave room for: header(1) + separator(1) + spacing(1) + input(1) + spacing(1) + status(1) = 6 lines
+		c.viewport.Height = msg.Height - 6
 		if !c.ready {
 			c.ready = true
 		}
@@ -157,21 +178,39 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		// Handle mouse events for selection
+		// Handle mouse events for selection and copy buttons
 		switch msg.Type {
 		case tea.MouseWheelUp:
 			c.viewport.LineUp(3)
 		case tea.MouseWheelDown:
 			c.viewport.LineDown(3)
 		case tea.MouseLeft:
-			// Start selection
+			// Check if click is on a copy button
+			clickY := msg.Y + c.viewport.YOffset
+			clickX := msg.X
+			
+			for _, btn := range c.copyButtons {
+				if clickX >= btn.X && clickX < btn.X + btn.Width &&
+				   clickY >= btn.Y && clickY < btn.Y + btn.Height {
+					// Copy button clicked!
+					c.copyMessage(btn.MessageIndex)
+					return c, c.ResetCopyFeedback()
+				}
+			}
+			
+			// Not a copy button, start text selection
 			c.selecting = true
-			c.selectStart = msg.Y + c.viewport.YOffset
+			c.selectStart = clickY
 		case tea.MouseRelease:
 			if c.selecting {
 				c.selectEnd = msg.Y + c.viewport.YOffset
 			}
 		}
+	
+	case CopyFeedbackResetMsg:
+		// Reset copy feedback
+		c.lastCopied = -1
+		c.updateContent()
 	}
 
 	// Update viewport
@@ -187,21 +226,8 @@ func (c ChatView) View() string {
 		return "\n  Initializing chat..."
 	}
 
-	// Main viewport
-	content := c.viewport.View()
-
-	// Status bar
-	statusBar := c.renderStatusBar()
-
-	// Help text
-	help := c.renderHelp()
-
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		content,
-		statusBar,
-		help,
-	)
+	// Just return the main viewport content - no extra status bars
+	return c.viewport.View()
 }
 
 // AddMessage adds a new message to the chat
@@ -225,6 +251,9 @@ func (c *ChatView) SetMessages(messages []ChatMessage) {
 // updateContent updates the viewport content from messages
 func (c *ChatView) updateContent() {
 	var content strings.Builder
+	
+	// Clear copy button areas
+	c.copyButtons = []CopyButtonArea{}
 	
 	// Calculate proper width for content
 	contentWidth := c.width - 8
@@ -255,8 +284,44 @@ func (c *ChatView) updateContent() {
 			content.WriteString(UserBubbleStyle.MaxWidth(contentWidth).Render(wrapped))
 			
 		case "assistant":
-			content.WriteString(AssistantLabelStyle.Render("Assistant"))
+			// Header with Assistant label and copy button
+			headerLeft := AssistantLabelStyle.Render("Assistant")
+			
+			// Show different button style if recently copied
+			var copyBtn string
+			if c.lastCopied == i {
+				copyBtn = CopyButtonCopiedStyle.Render("✓ Copied")
+			} else {
+				copyBtn = CopyButtonStyle.Render("📋 Copy")
+			}
+			
+			// Calculate positions for copy button tracking
+			currentLine := strings.Count(content.String(), "\n")
+			btnX := contentWidth - 10 // Position from right
+			btnY := currentLine + 1 // Below timestamp
+			
+			// Track copy button area for click detection
+			c.copyButtons = append(c.copyButtons, CopyButtonArea{
+				MessageIndex: i,
+				X:            btnX,
+				Y:            btnY,
+				Width:        10,
+				Height:       1,
+			})
+			
+			// Create header with copy button aligned to right
+			headerPadding := contentWidth - len("Assistant") - 10
+			if headerPadding < 1 {
+				headerPadding = 1
+			}
+			header := lipgloss.JoinHorizontal(lipgloss.Left,
+				headerLeft,
+				strings.Repeat(" ", headerPadding),
+				copyBtn,
+			)
+			content.WriteString(header)
 			content.WriteString("\n")
+			
 			// Format and wrap AI response
 			formatted := FormatAIResponse(msg.Content, contentWidth-4)
 			content.WriteString(AssistantBubbleStyle.MaxWidth(contentWidth).Render(formatted))
@@ -401,9 +466,11 @@ func (c *ChatView) copySelection() {
 		selectedText.WriteString(clean)
 	}
 	
-	// Copy to clipboard (using a simple implementation)
-	// In production, you'd use github.com/atotto/clipboard
-	c.clipboardCopy = selectedText.String()
+	// Copy to system clipboard
+	text := selectedText.String()
+	if err := clipboard.WriteAll(text); err == nil {
+		c.clipboardCopy = text // Also store locally for feedback
+	}
 	
 	// Show feedback
 	c.selecting = false
@@ -413,12 +480,37 @@ func (c *ChatView) copySelection() {
 func (c *ChatView) CopyLastMessage() {
 	for i := len(c.messages) - 1; i >= 0; i-- {
 		if c.messages[i].Role == "assistant" {
-			c.clipboardCopy = c.messages[i].Content
+			text := c.messages[i].Content
+			if err := clipboard.WriteAll(text); err == nil {
+				c.clipboardCopy = text // Also store locally for feedback
+			}
 			return
 		}
 	}
 }
 
+// copyMessage copies a specific message by index
+func (c *ChatView) copyMessage(messageIndex int) {
+	if messageIndex >= 0 && messageIndex < len(c.messages) {
+		text := c.messages[messageIndex].Content
+		if err := clipboard.WriteAll(text); err == nil {
+			c.clipboardCopy = text
+			c.lastCopied = messageIndex
+			// Reset the copied state after update to redraw
+			c.updateContent()
+		}
+	}
+}
+
+// ResetCopyFeedback resets the copy feedback after a delay
+func (c *ChatView) ResetCopyFeedback() tea.Cmd {
+	return tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+		return CopyFeedbackResetMsg{}
+	})
+}
+
+// CopyFeedbackResetMsg is sent to reset copy feedback
+type CopyFeedbackResetMsg struct{}
 
 // SearchMessages searches through messages
 func (c *ChatView) SearchMessages(query string) []int {
@@ -487,4 +579,20 @@ var (
 		
 	HelpStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("241"))
+	
+	CopyButtonStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("12")).
+		Background(lipgloss.Color("237")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 1).
+		Bold(true)
+	
+	CopyButtonCopiedStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("10")).
+		Background(lipgloss.Color("22")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("10")).
+		Padding(0, 1).
+		Bold(true)
 )

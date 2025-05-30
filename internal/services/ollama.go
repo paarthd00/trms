@@ -26,6 +26,17 @@ type OllamaService struct {
 	cancelPull      chan bool
 	activeDownloads map[string]*models.PullProgress
 	modelManager    *ModelManager
+	downloadStats   map[string]*DownloadStats
+}
+
+// DownloadStats tracks download statistics for speed/ETA calculation
+type DownloadStats struct {
+	StartTime    time.Time
+	LastUpdate   time.Time
+	LastBytes    int64
+	TotalBytes   int64
+	Speed        string
+	ETA          string
 }
 
 // NewOllamaService creates a new OllamaService instance
@@ -35,6 +46,7 @@ func NewOllamaService() *OllamaService {
 		activeDownloads: make(map[string]*models.PullProgress),
 		cancelPull:      make(chan bool, 1),
 		modelManager:    NewModelManager(),
+		downloadStats:   make(map[string]*DownloadStats),
 	}
 }
 
@@ -152,6 +164,59 @@ func (o *OllamaService) SetCurrentModel(model string) {
 	o.currentModel = model
 }
 
+// GetProgress returns the current progress for a model download
+func (o *OllamaService) GetProgress(model string) *models.PullProgress {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	
+	if progress, exists := o.activeDownloads[model]; exists {
+		// Get speed and ETA from download stats
+		var speed, eta string
+		if stats, statsExist := o.downloadStats[model]; statsExist {
+			speed = stats.Speed
+			eta = stats.ETA
+		}
+		
+		// Return a copy to avoid race conditions
+		result := &models.PullProgress{
+			Model:      progress.Model,
+			Status:     progress.Status,
+			Percent:    progress.Percent,
+			Downloaded: progress.Downloaded,
+			Total:      progress.Total,
+		}
+		
+		// Add speed and ETA to the status for display
+		if speed != "" && eta != "" {
+			result.Status = fmt.Sprintf("%s • %s • ETA: %s", progress.Status, speed, eta)
+		} else if speed != "" {
+			result.Status = fmt.Sprintf("%s • %s", progress.Status, speed)
+		}
+		
+		return result
+	}
+	return nil
+}
+
+// GetActiveDownloads returns all currently active downloads
+func (o *OllamaService) GetActiveDownloads() map[string]*models.PullProgress {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	
+	// Return a copy to avoid race conditions
+	activeDownloads := make(map[string]*models.PullProgress)
+	for model, progress := range o.activeDownloads {
+		activeDownloads[model] = &models.PullProgress{
+			Model:      progress.Model,
+			Status:     progress.Status,
+			Percent:    progress.Percent,
+			Downloaded: progress.Downloaded,
+			Total:      progress.Total,
+		}
+	}
+	return activeDownloads
+}
+
 // PullModel pulls a model from Ollama
 func (o *OllamaService) PullModel(model string) error {
 	o.mu.Lock()
@@ -162,6 +227,14 @@ func (o *OllamaService) PullModel(model string) error {
 		Percent: 0,
 	}
 	o.activeDownloads[model] = o.pullProgress
+	
+	// Initialize download stats
+	o.downloadStats[model] = &DownloadStats{
+		StartTime:  time.Now(),
+		LastUpdate: time.Now(),
+		LastBytes:  0,
+		TotalBytes: 0,
+	}
 	o.mu.Unlock()
 
 	defer func() {
@@ -214,16 +287,66 @@ func (o *OllamaService) PullModel(model string) error {
 			o.mu.Lock()
 			if o.pullProgress != nil {
 				o.pullProgress.Status = progress.Status
-				if progress.Total > 0 {
+				
+				// Handle both formats: numeric bytes and string format
+				if progress.Total > 0 && progress.Completed > 0 {
+					// Direct numeric values from API
 					o.pullProgress.Percent = int(float64(progress.Completed) / float64(progress.Total) * 100)
 					o.pullProgress.Downloaded = formatBytes(progress.Completed)
 					o.pullProgress.Total = formatBytes(progress.Total)
+					
+					// Calculate speed and ETA
+					if stats, exists := o.downloadStats[model]; exists {
+						now := time.Now()
+						timeDiff := now.Sub(stats.LastUpdate).Seconds()
+						
+						if timeDiff > 0 {
+							bytesDiff := progress.Completed - stats.LastBytes
+							if bytesDiff > 0 {
+								speedBytesPerSec := float64(bytesDiff) / timeDiff
+								stats.Speed = formatBytes(int64(speedBytesPerSec)) + "/s"
+								
+								// Calculate ETA
+								remaining := progress.Total - progress.Completed
+								if speedBytesPerSec > 0 {
+									etaSeconds := float64(remaining) / speedBytesPerSec
+									stats.ETA = formatDuration(time.Duration(etaSeconds) * time.Second)
+								}
+							}
+						}
+						
+						stats.LastUpdate = now
+						stats.LastBytes = progress.Completed
+						stats.TotalBytes = progress.Total
+					}
+				} else if progress.Downloaded != "" {
+					// String format from API (e.g., "1.2 GB")
+					o.pullProgress.Downloaded = progress.Downloaded
+					if o.pullProgress.Total == "" && progress.Total > 0 {
+						o.pullProgress.Total = formatBytes(progress.Total)
+					}
+				}
+				
+				// Update percent if available
+				if progress.Percent > 0 {
+					o.pullProgress.Percent = progress.Percent
 				}
 			}
 			o.mu.Unlock()
 		}
 	}
 
+	// Mark download as complete and clean up
+	o.mu.Lock()
+	if o.pullProgress != nil {
+		o.pullProgress.Status = "Download complete"
+		o.pullProgress.Percent = 100
+	}
+	delete(o.activeDownloads, model)
+	delete(o.downloadStats, model)
+	o.isPulling = false
+	o.mu.Unlock()
+	
 	// Refresh models after successful pull
 	o.RefreshModels()
 	return scanner.Err()
@@ -286,18 +409,6 @@ func (o *OllamaService) GetPullProgress() *models.PullProgress {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.pullProgress
-}
-
-// GetActiveDownloads returns all active downloads
-func (o *OllamaService) GetActiveDownloads() map[string]*models.PullProgress {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	
-	downloads := make(map[string]*models.PullProgress)
-	for k, v := range o.activeDownloads {
-		downloads[k] = v
-	}
-	return downloads
 }
 
 // Chat sends a chat message to the current model
@@ -393,6 +504,60 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// formatDuration formats a duration to human readable string
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	if d < time.Hour {
+		minutes := int(d.Minutes())
+		seconds := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", hours, minutes)
+}
+
+// ModelInfo represents detailed information about a model
+type ModelInfo struct {
+	Name         string                 `json:"name"`
+	ModifiedAt   string                 `json:"modified_at"`
+	Size         int64                  `json:"size"`
+	Digest       string                 `json:"digest"`
+	Details      ModelDetails           `json:"details"`
+	License      string                 `json:"license"`
+	ModelFile    string                 `json:"modelfile"`
+	Parameters   map[string]interface{} `json:"parameters"`
+	Template     string                 `json:"template"`
+}
+
+// ModelDetails represents model configuration details
+type ModelDetails struct {
+	Format            string `json:"format"`
+	Family            string `json:"family"`
+	Families          []string `json:"families"`
+	ParameterSize     string `json:"parameter_size"`
+	QuantizationLevel string `json:"quantization_level"`
+}
+
+// GetModelInfo retrieves detailed information about a model using ollama show
+func (o *OllamaService) GetModelInfo(modelName string) (*ModelInfo, error) {
+	// Use ollama show command to get model info
+	cmd := exec.Command("ollama", "show", modelName, "--json")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get model info: %v", err)
+	}
+
+	var modelInfo ModelInfo
+	if err := json.Unmarshal(output, &modelInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse model info: %v", err)
+	}
+
+	return &modelInfo, nil
 }
 
 // Helper to check if model exists

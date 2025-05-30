@@ -33,8 +33,11 @@ type ModelManagerItem struct {
 	Downloaded  int64
 	Percent     int
 	Error       string
+	Speed       string // Download speed like "5.2 MB/s"
+	ETA         string // Estimated time remaining like "2m 30s"
 	IsHeader    bool
 	IsSeparator bool
+	IsCurrent   bool   // Whether this is the currently selected model
 }
 
 // Implement list.Item interface
@@ -46,25 +49,36 @@ func (i ModelManagerItem) Title() string {
 		return SeparatorStyle.Render("────────────────────────────────────────")
 	}
 
-	// Status icon based on state
-	var status string
+	// Status icon and progress based on state
+	var status, progressBar string
 	switch i.State {
 	case services.ModelStateComplete:
-		status = "✅"
+		if i.IsCurrent {
+			status = "●" // Current model indicator - clean dot
+		} else {
+			status = "✓" // Clean checkmark
+		}
 	case services.ModelStateDownloading:
-		status = fmt.Sprintf("⏬ %d%%", i.Percent)
+		status = fmt.Sprintf("↓ %d%%", i.Percent)
+		progressBar = renderProgressBar(i.Percent, 20, "█", "░")
 	case services.ModelStatePartial:
-		status = fmt.Sprintf("⚠️  %d%%", i.Percent)
+		status = fmt.Sprintf("⚠ %d%%", i.Percent)
+		progressBar = renderProgressBar(i.Percent, 20, "█", "░")
 	case services.ModelStateCorrupted:
-		status = "❌"
+		status = "✗"
 	default:
-		status = "📥"
+		status = "○"
 	}
 
-	// Size info
-	sizeInfo := formatBytes(i.Size)
+	// Size info with better formatting
+	var sizeInfo string
 	if i.State == services.ModelStatePartial || i.State == services.ModelStateDownloading {
 		sizeInfo = fmt.Sprintf("%s / %s", formatBytes(i.Downloaded), formatBytes(i.Size))
+		if progressBar != "" {
+			sizeInfo += fmt.Sprintf("\n    %s", progressBar)
+		}
+	} else {
+		sizeInfo = formatBytes(i.Size)
 	}
 
 	return fmt.Sprintf("%s %-25s %s", status, i.Name, sizeInfo)
@@ -77,15 +91,23 @@ func (i ModelManagerItem) Description() string {
 
 	switch i.State {
 	case services.ModelStateComplete:
-		return "Ready to use"
+		if i.IsCurrent {
+			return "Currently active model"
+		} else {
+			return "Ready to use • Press Enter to switch"
+		}
 	case services.ModelStateDownloading:
-		return "Currently downloading..."
+		desc := fmt.Sprintf("Downloading %d%%", i.Percent)
+		if i.Speed != "" && i.ETA != "" {
+			desc += fmt.Sprintf(" • %s • ETA: %s", i.Speed, i.ETA)
+		}
+		return desc
 	case services.ModelStatePartial:
-		return "Partial download - press 'r' to resume or 'd' to delete"
+		return fmt.Sprintf("Partial download %d%% • Press Enter to resume or 'c' to clean", i.Percent)
 	case services.ModelStateCorrupted:
-		return fmt.Sprintf("Corrupted: %s - press 'd' to clean", i.Error)
+		return fmt.Sprintf("Corrupted: %s • Press 'c' to clean", i.Error)
 	default:
-		return "Not installed - press Enter to download"
+		return "Available for download • Press Enter to start"
 	}
 }
 
@@ -142,11 +164,11 @@ var modelManagerKeys = modelManagerKeyMap{
 func NewModelManagerView(width, height int) ModelManagerView {
 	items := []list.Item{}
 	l := list.New(items, list.NewDefaultDelegate(), width, height-4)
-	l.Title = "Model Management"
+	l.Title = ""  // Remove title as we handle it in the main view
 	l.SetShowHelp(false)
-	l.SetFilteringEnabled(true)
-	l.Styles.Title = HeaderStyle
-	l.Styles.TitleBar = lipgloss.NewStyle().Background(lipgloss.Color("235"))
+	l.SetFilteringEnabled(false)  // Disable filtering for cleaner UI
+	l.Styles.Title = lipgloss.NewStyle()  // Clear title style
+	l.Styles.TitleBar = lipgloss.NewStyle()  // Clear title bar style
 
 	vp := viewport.New(width, height/3)
 	vp.SetContent("")
@@ -415,7 +437,7 @@ func (m ModelManagerView) renderHelp() string {
 
 	helpItems = append(helpItems, "i: Details", "R: Refresh", "↑/↓: Navigate", "ESC: Back")
 
-	return HelpStyle.Render(strings.Join(helpItems, " • "))
+	return ModelHelpStyle.Render(strings.Join(helpItems, " • "))
 }
 
 // Helper functions
@@ -449,6 +471,22 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// renderProgressBar creates a visual progress bar
+func renderProgressBar(percent, width int, filled, empty string) string {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	
+	filledWidth := (percent * width) / 100
+	emptyWidth := width - filledWidth
+	
+	bar := strings.Repeat(filled, filledWidth) + strings.Repeat(empty, emptyWidth)
+	return fmt.Sprintf("[%s] %d%%", bar, percent)
+}
+
 func parseSize(sizeStr string) int64 {
 	// Simple parser for sizes like "3.8GB", "400MB"
 	sizeStr = strings.TrimSpace(sizeStr)
@@ -476,12 +514,84 @@ func parseSize(sizeStr string) int64 {
 	return int64(num * float64(multiplier))
 }
 
+// UpdateProgress updates the progress for a specific model
+func (m *ModelManagerView) UpdateProgress(modelName string, percent int, downloaded, total string) {
+	// Update the model states map if we have it
+	if m.modelStates != nil {
+		if status, exists := m.modelStates[modelName]; exists {
+			status.Percent = percent
+			status.State = services.ModelStateDownloading
+		}
+	}
+	
+	// Find and update the list item
+	items := m.list.Items()
+	for i, item := range items {
+		if modelItem, ok := item.(ModelManagerItem); ok && modelItem.Name == modelName {
+			modelItem.Percent = percent
+			modelItem.State = services.ModelStateDownloading
+			
+			// Update bytes information
+			if downloaded != "" {
+				modelItem.Speed = downloaded // Store current downloaded amount
+			}
+			if total != "" {
+				modelItem.ETA = total // Store total size (we'll improve this later)
+			}
+			
+			// Update the item in the list
+			items[i] = modelItem
+		}
+	}
+	m.list.SetItems(items)
+}
+
+// SetModelDownloading marks a model as starting to download
+func (m *ModelManagerView) SetModelDownloading(modelName string) {
+	// Update the model states map if we have it
+	if m.modelStates != nil {
+		if status, exists := m.modelStates[modelName]; exists {
+			status.State = services.ModelStateDownloading
+			status.Percent = 0
+		}
+	}
+	
+	// Find and update the list item
+	items := m.list.Items()
+	for i, item := range items {
+		if modelItem, ok := item.(ModelManagerItem); ok && modelItem.Name == modelName {
+			modelItem.State = services.ModelStateDownloading
+			modelItem.Percent = 0
+			// Update the item in the list
+			items[i] = modelItem
+		}
+	}
+	m.list.SetItems(items)
+}
+
+// SetCurrentModel marks a model as the currently active one
+func (m *ModelManagerView) SetCurrentModel(currentModelName string) {
+	items := m.list.Items()
+	for i, item := range items {
+		if modelItem, ok := item.(ModelManagerItem); ok && !modelItem.IsHeader && !modelItem.IsSeparator {
+			// Mark as current if it matches, unmark if it doesn't
+			modelItem.IsCurrent = (modelItem.Name == currentModelName)
+			items[i] = modelItem
+		}
+	}
+	m.list.SetItems(items)
+}
+
 // Additional styles needed
 var (
 	HeaderStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("213")).
-		Bold(true)
+		Foreground(lipgloss.Color("12")).
+		Bold(true).
+		Padding(0, 1)
 
 	SeparatorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("238"))
+		Foreground(lipgloss.Color("240"))
+		
+	ModelHelpStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("243"))
 )
