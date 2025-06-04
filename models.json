@@ -1,0 +1,448 @@
+{
+  "models": {
+    "general": [
+      {
+        "name": "llama3.2",
+        "size": "2.0GB",
+        "memory_gb": 4,
+        "description": "Meta's latest Llama 3.2 model with improved performance"
+      },
+      {
+        "name": "llama3.1",
+        "size": "4.7GB",
+        "memory_gb": 8,
+        "description": "Meta's Llama 3.1 model with enhanced capabilities"
+      },
+      {
+        "name": "llama3",
+        "size": "4.7GB",
+        "memory_gb": 8,
+        "description": "Meta's Llama 3 base model"
+      },
+      {
+        "name": "llama2",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Meta's Llama 2 model for general conversations"
+      },
+      {
+        "name": "mistral",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Mistral AI's flagship model"
+      },
+      {
+        "name": "mixtral",
+        "size": "26GB",
+        "memory_gb": 48,
+        "description": "Mistral's mixture of experts model"
+      },
+      {
+        "name": "qwen2.5",
+        "size": "4.4GB",
+        "memory_gb": 8,
+        "description": "Alibaba's Qwen 2.5 model"
+      },
+      {
+        "name": "qwen2",
+        "size": "4.4GB",
+        "memory_gb": 8,
+        "description": "Alibaba's Qwen 2.0 model"
+      },
+      {
+        "name": "gemma2",
+        "size": "5.4GB",
+        "memory_gb": 10,
+        "description": "Google's Gemma 2 model"
+      },
+      {
+        "name": "gemma",
+        "size": "5.0GB",
+        "memory_gb": 10,
+        "description": "Google's Gemma model"
+      }
+    ],
+    "coding": [
+      {
+        "name": "codellama",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Meta's Code Llama for programming tasks"
+      },
+      {
+        "name": "codegemma",
+        "size": "5.0GB",
+        "memory_gb": 10,
+        "description": "Google's CodeGemma for code generation"
+      },
+      {
+        "name": "deepseek-coder",
+        "size": "6.4GB",
+        "memory_gb": 12,
+        "description": "DeepSeek's specialized coding model"
+      },
+      {
+        "name": "starcoder2",
+        "size": "4.0GB",
+        "memory_gb": 8,
+        "description": "Hugging Face's StarCoder 2 for coding"
+      },
+      {
+        "name": "magicoder",
+        "size": "6.7GB",
+        "memory_gb": 12,
+        "description": "OSS-Instruct trained coding model"
+      },
+      {
+        "name": "wizard-coder",
+        "size": "6.7GB",
+        "memory_gb": 12,
+        "description": "WizardLM's specialized coding model"
+      }
+    ],
+    "small": [
+      {
+        "name": "phi3.5",
+        "size": "2.2GB",
+        "memory_gb": 4,
+        "description": "Microsoft's Phi-3.5 small but powerful model"
+      },
+      {
+        "name": "phi3",
+        "size": "2.3GB",
+        "memory_gb": 4,
+        "description": "Microsoft's Phi-3 compact model"
+      },
+      {
+        "name": "phi",
+        "size": "1.6GB",
+        "memory_gb": 3,
+        "description": "Microsoft's original Phi model"
+      },
+      {
+        "name": "tinyllama",
+        "size": "637MB",
+        "memory_gb": 2,
+        "description": "Compact 1.1B parameter model"
+      },
+      {
+        "name": "orca-mini",
+        "size": "1.9GB",
+        "memory_gb": 4,
+        "description": "Small model based on Llama"
+      },
+      {
+        "name": "llama3.2:1b",
+        "size": "1.3GB",
+        "memory_gb": 3,
+        "description": "Llama 3.2 1B parameter model"
+      },
+      {
+        "name": "llama3.2:3b",
+        "size": "2.0GB",
+        "memory_gb": 4,
+        "description": "Llama 3.2 3B parameter model"
+      },
+      {
+        "name": "qwen2.5:0.5b",
+        "size": "394MB",
+        "memory_gb": 2,
+        "description": "Qwen 2.5 0.5B parameter model"
+      },
+      {
+        "name": "qwen2.5:1.5b",
+        "size": "934MB",
+        "memory_gb": 2,
+        "description": "Qwen 2.5 1.5B parameter model"
+      }
+    ],
+    "vision": [
+      {
+        "name": "llava",
+        "size": "4.5GB",
+        "memory_gb": 8,
+        "description": "Large Language and Vision Assistant"
+      },
+      {
+        "name": "llava-llama3",
+        "size": "5.5GB",
+        "memory_gb": 10,
+        "description": "LLaVA based on Llama 3"
+      },
+      {
+        "name": "llava-phi3",
+        "size": "2.9GB",
+        "memory_gb": 6,
+        "description": "LLaVA based on Phi-3"
+      },
+      {
+        "name": "bakllava",
+        "size": "4.4GB",
+        "memory_gb": 8,
+        "description": "BakLLaVA vision model"
+      },
+      {
+        "name": "moondream",
+        "size": "829MB",
+        "memory_gb": 2,
+        "description": "Small vision language model"
+      },
+      {
+        "name": "llama3.2-vision",
+        "size": "7.9GB",
+        "memory_gb": 16,
+        "description": "Llama 3.2 with vision capabilities"
+      }
+    ],
+    "math": [
+      {
+        "name": "mathstral",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Mistral's specialized math model"
+      },
+      {
+        "name": "qwen2-math",
+        "size": "4.4GB",
+        "memory_gb": 8,
+        "description": "Qwen2 specialized for mathematics"
+      },
+      {
+        "name": "deepseek-math",
+        "size": "6.4GB",
+        "memory_gb": 12,
+        "description": "DeepSeek's mathematical reasoning model"
+      }
+    ],
+    "multilingual": [
+      {
+        "name": "aya",
+        "size": "4.8GB",
+        "memory_gb": 8,
+        "description": "Multilingual model covering 101 languages"
+      },
+      {
+        "name": "command-r",
+        "size": "20GB",
+        "memory_gb": 35,
+        "description": "Cohere's multilingual model"
+      },
+      {
+        "name": "command-r-plus",
+        "size": "59GB",
+        "memory_gb": 128,
+        "description": "Cohere's advanced multilingual model"
+      }
+    ],
+    "embedding": [
+      {
+        "name": "nomic-embed-text",
+        "size": "274MB",
+        "memory_gb": 1,
+        "description": "Text embedding model by Nomic AI"
+      },
+      {
+        "name": "mxbai-embed-large",
+        "size": "669MB",
+        "memory_gb": 2,
+        "description": "Large embedding model by MixedBread AI"
+      },
+      {
+        "name": "all-minilm",
+        "size": "46MB",
+        "memory_gb": 1,
+        "description": "Compact sentence embedding model"
+      },
+      {
+        "name": "snowflake-arctic-embed",
+        "size": "669MB",
+        "memory_gb": 2,
+        "description": "Snowflake's Arctic embedding model"
+      }
+    ],
+    "creative": [
+      {
+        "name": "neural-chat",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Intel's neural chat model"
+      },
+      {
+        "name": "dolphin-mistral",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Uncensored Dolphin model based on Mistral"
+      },
+      {
+        "name": "dolphin-llama3",
+        "size": "4.7GB",
+        "memory_gb": 8,
+        "description": "Uncensored Dolphin model based on Llama 3"
+      },
+      {
+        "name": "wizard-vicuna-uncensored",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Uncensored model for creative writing"
+      },
+      {
+        "name": "nous-hermes2",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Nous Research's Hermes 2 model"
+      }
+    ],
+    "specialized": [
+      {
+        "name": "medllama2",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Medical domain specialized Llama 2"
+      },
+      {
+        "name": "meditron",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Medical domain language model"
+      },
+      {
+        "name": "sqlcoder",
+        "size": "6.7GB",
+        "memory_gb": 12,
+        "description": "Specialized model for SQL generation"
+      },
+      {
+        "name": "stable-code",
+        "size": "1.6GB",
+        "memory_gb": 4,
+        "description": "Stability AI's code completion model"
+      },
+      {
+        "name": "openchat",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "OpenChat conversation model"
+      },
+      {
+        "name": "vicuna",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Berkeley's Vicuna model"
+      },
+      {
+        "name": "orca2",
+        "size": "3.8GB",
+        "memory_gb": 8,
+        "description": "Microsoft's Orca 2 model"
+      },
+      {
+        "name": "starling-lm",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Berkeley's Starling model"
+      },
+      {
+        "name": "zephyr",
+        "size": "4.1GB",
+        "memory_gb": 8,
+        "description": "Hugging Face's Zephyr model"
+      },
+      {
+        "name": "stablelm2",
+        "size": "983MB",
+        "memory_gb": 2,
+        "description": "Stability AI's language model"
+      }
+    ],
+    "image-generation": [
+      {
+        "name": "stable-diffusion",
+        "size": "2.3GB",
+        "memory_gb": 6,
+        "description": "Stable Diffusion image generation model"
+      },
+      {
+        "name": "flux",
+        "size": "11.9GB",
+        "memory_gb": 24,
+        "description": "Black Forest Labs' FLUX image generation model"
+      },
+      {
+        "name": "flux-schnell",
+        "size": "11.9GB",
+        "memory_gb": 24,
+        "description": "FLUX Schnell - faster image generation variant"
+      },
+      {
+        "name": "sdxl",
+        "size": "6.9GB",
+        "memory_gb": 12,
+        "description": "Stable Diffusion XL for high-quality images"
+      },
+      {
+        "name": "playground-v2.5",
+        "size": "5.5GB",
+        "memory_gb": 10,
+        "description": "Playground AI's image generation model"
+      },
+      {
+        "name": "dreamshaper",
+        "size": "2.0GB",
+        "memory_gb": 4,
+        "description": "Community fine-tuned Stable Diffusion model"
+      }
+    ]
+  },
+  "categories": {
+    "general": {
+      "name": "General Purpose",
+      "icon": "🤖",
+      "description": "Versatile models for general conversations and tasks"
+    },
+    "coding": {
+      "name": "Programming",
+      "icon": "💻",
+      "description": "Specialized models for code generation and programming assistance"
+    },
+    "small": {
+      "name": "Lightweight",
+      "icon": "⚡",
+      "description": "Compact models for systems with limited resources"
+    },
+    "vision": {
+      "name": "Vision & Images",
+      "icon": "👁️",
+      "description": "Models that can process and understand images"
+    },
+    "math": {
+      "name": "Mathematics",
+      "icon": "🧮",
+      "description": "Models specialized for mathematical reasoning and problem solving"
+    },
+    "multilingual": {
+      "name": "Multilingual",
+      "icon": "🌍",
+      "description": "Models supporting multiple languages"
+    },
+    "embedding": {
+      "name": "Embeddings",
+      "icon": "🔗",
+      "description": "Models for text embeddings and semantic search"
+    },
+    "creative": {
+      "name": "Creative Writing",
+      "icon": "✍️",
+      "description": "Models for creative writing, storytelling, and uncensored content"
+    },
+    "specialized": {
+      "name": "Domain Specific",
+      "icon": "🎯",
+      "description": "Models fine-tuned for specific domains and use cases"
+    },
+    "image-generation": {
+      "name": "Image Generation",
+      "icon": "🎨",
+      "description": "Models for generating images from text prompts"
+    }
+  }
+}

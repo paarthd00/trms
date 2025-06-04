@@ -21,6 +21,7 @@ const (
 	ModelSelectionMode
 	ConfirmationMode
 	ModelInfoMode
+	CategorySelectionMode
 )
 
 // AppModel is the main application model
@@ -175,6 +176,8 @@ type (
 		Info      interface{}
 		Err       error
 	}
+	
+	ShowCopyHistoryMsg struct{}
 )
 
 // Init initializes the application model

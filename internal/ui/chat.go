@@ -27,6 +27,14 @@ type ChatView struct {
 	clipboardCopy string
 	copyButtons   []CopyButtonArea
 	lastCopied    int // Index of last copied message for feedback
+	copyHistory   []CopyHistoryItem // Stack of copied messages (max 10)
+}
+
+// CopyHistoryItem represents a copied message in history
+type CopyHistoryItem struct {
+	Content   string
+	Timestamp time.Time
+	Source    string // "assistant", "user", "system"
 }
 
 // CopyButtonArea defines a clickable copy button area
@@ -59,15 +67,16 @@ type ChatMessage struct {
 
 // KeyMap defines key bindings for the chat view
 type keyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	PageUp   key.Binding
-	PageDown key.Binding
-	Home     key.Binding
-	End      key.Binding
-	Copy     key.Binding
-	Select   key.Binding
-	Search   key.Binding
+	Up          key.Binding
+	Down        key.Binding
+	PageUp      key.Binding
+	PageDown    key.Binding
+	Home        key.Binding
+	End         key.Binding
+	Copy        key.Binding
+	Select      key.Binding
+	Search      key.Binding
+	CopyHistory key.Binding
 }
 
 var keys = keyMap{
@@ -107,6 +116,10 @@ var keys = keyMap{
 		key.WithKeys("/", "ctrl+f"),
 		key.WithHelp("//Ctrl+F", "search"),
 	),
+	CopyHistory: key.NewBinding(
+		key.WithKeys("ctrl+p"),
+		key.WithHelp("Ctrl+P", "copy history"),
+	),
 }
 
 // New creates a new ChatView
@@ -116,11 +129,12 @@ func NewChatView(width, height int) ChatView {
 	vp.MouseWheelEnabled = true
 
 	return ChatView{
-		viewport:   vp,
-		messages:   []ChatMessage{},
-		width:      width,
-		height:     height,
-		lastCopied: -1, // Initialize to invalid index
+		viewport:    vp,
+		messages:    []ChatMessage{},
+		width:       width,
+		height:      height,
+		lastCopied:  -1, // Initialize to invalid index
+		copyHistory: []CopyHistoryItem{}, // Initialize empty copy history
 	}
 }
 
@@ -175,6 +189,9 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				// If not selecting, copy last assistant message
 				c.CopyLastMessage()
 			}
+		case key.Matches(msg, keys.CopyHistory):
+			// Show copy history (return command to parent)
+			return c, ShowCopyHistoryCmd()
 		}
 
 	case tea.MouseMsg:
@@ -186,7 +203,10 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			c.viewport.LineDown(3)
 		case tea.MouseLeft:
 			// Check if click is on a copy button
-			clickY := msg.Y + c.viewport.YOffset
+			// msg.Y is relative to the terminal, not the viewport
+			// The viewport starts at Y=3 (after header, separator, and blank line)
+			viewportY := msg.Y - 3
+			clickY := viewportY + c.viewport.YOffset
 			clickX := msg.X
 			
 			for _, btn := range c.copyButtons {
@@ -203,7 +223,8 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			c.selectStart = clickY
 		case tea.MouseRelease:
 			if c.selecting {
-				c.selectEnd = msg.Y + c.viewport.YOffset
+				viewportY := msg.Y - 3
+				c.selectEnd = viewportY + c.viewport.YOffset
 			}
 		}
 	
@@ -287,39 +308,52 @@ func (c *ChatView) updateContent() {
 			// Header with Assistant label and copy button
 			headerLeft := AssistantLabelStyle.Render("Assistant")
 			
-			// Show different button style if recently copied
+			// Only show copy button if message is not "Thinking..."
+			showCopyButton := msg.Content != "Thinking..."
+			
 			var copyBtn string
-			if c.lastCopied == i {
-				copyBtn = CopyButtonCopiedStyle.Render("✓ Copied")
+			if showCopyButton {
+				// Show different button style if recently copied
+				if c.lastCopied == i {
+					copyBtn = CopyButtonCopiedStyle.Render("✓ Copied")
+				} else {
+					copyBtn = CopyButtonStyle.Render("📋 Copy")
+				}
+			}
+			
+			if showCopyButton {
+				// Calculate positions for copy button tracking
+				currentLine := strings.Count(content.String(), "\n")
+				// Account for viewport padding and centering
+				// The content is centered in the viewport, so calculate the actual X position
+				viewportPadding := (c.width - contentWidth) / 2
+				btnX := viewportPadding + contentWidth - 10 // Position from right of content
+				btnY := currentLine + 1 // On the Assistant header line (after timestamp)
+				
+				// Track copy button area for click detection
+				c.copyButtons = append(c.copyButtons, CopyButtonArea{
+					MessageIndex: i,
+					X:            btnX,
+					Y:            btnY,
+					Width:        10,
+					Height:       1,
+				})
+				
+				// Create header with copy button aligned to right
+				headerPadding := contentWidth - len("Assistant") - 10
+				if headerPadding < 1 {
+					headerPadding = 1
+				}
+				header := lipgloss.JoinHorizontal(lipgloss.Left,
+					headerLeft,
+					strings.Repeat(" ", headerPadding),
+					copyBtn,
+				)
+				content.WriteString(header)
 			} else {
-				copyBtn = CopyButtonStyle.Render("📋 Copy")
+				// Just show the assistant label without copy button
+				content.WriteString(headerLeft)
 			}
-			
-			// Calculate positions for copy button tracking
-			currentLine := strings.Count(content.String(), "\n")
-			btnX := contentWidth - 10 // Position from right
-			btnY := currentLine + 1 // Below timestamp
-			
-			// Track copy button area for click detection
-			c.copyButtons = append(c.copyButtons, CopyButtonArea{
-				MessageIndex: i,
-				X:            btnX,
-				Y:            btnY,
-				Width:        10,
-				Height:       1,
-			})
-			
-			// Create header with copy button aligned to right
-			headerPadding := contentWidth - len("Assistant") - 10
-			if headerPadding < 1 {
-				headerPadding = 1
-			}
-			header := lipgloss.JoinHorizontal(lipgloss.Left,
-				headerLeft,
-				strings.Repeat(" ", headerPadding),
-				copyBtn,
-			)
-			content.WriteString(header)
 			content.WriteString("\n")
 			
 			// Format and wrap AI response
@@ -470,6 +504,8 @@ func (c *ChatView) copySelection() {
 	text := selectedText.String()
 	if err := clipboard.WriteAll(text); err == nil {
 		c.clipboardCopy = text // Also store locally for feedback
+		// Add to copy history
+		c.addToCopyHistory(text, "selection")
 	}
 	
 	// Show feedback
@@ -483,6 +519,8 @@ func (c *ChatView) CopyLastMessage() {
 			text := c.messages[i].Content
 			if err := clipboard.WriteAll(text); err == nil {
 				c.clipboardCopy = text // Also store locally for feedback
+				// Add to copy history
+				c.addToCopyHistory(text, "assistant")
 			}
 			return
 		}
@@ -492,10 +530,12 @@ func (c *ChatView) CopyLastMessage() {
 // copyMessage copies a specific message by index
 func (c *ChatView) copyMessage(messageIndex int) {
 	if messageIndex >= 0 && messageIndex < len(c.messages) {
-		text := c.messages[messageIndex].Content
-		if err := clipboard.WriteAll(text); err == nil {
-			c.clipboardCopy = text
+		msg := c.messages[messageIndex]
+		if err := clipboard.WriteAll(msg.Content); err == nil {
+			c.clipboardCopy = msg.Content
 			c.lastCopied = messageIndex
+			// Add to copy history
+			c.addToCopyHistory(msg.Content, msg.Role)
 			// Reset the copied state after update to redraw
 			c.updateContent()
 		}
@@ -511,6 +551,92 @@ func (c *ChatView) ResetCopyFeedback() tea.Cmd {
 
 // CopyFeedbackResetMsg is sent to reset copy feedback
 type CopyFeedbackResetMsg struct{}
+
+// addToCopyHistory adds a copied item to the history stack (max 10 items)
+func (c *ChatView) addToCopyHistory(content, source string) {
+	// Create new history item
+	item := CopyHistoryItem{
+		Content:   content,
+		Timestamp: time.Now(),
+		Source:    source,
+	}
+	
+	// Add to front of slice
+	c.copyHistory = append([]CopyHistoryItem{item}, c.copyHistory...)
+	
+	// Keep only last 10 items
+	if len(c.copyHistory) > 10 {
+		c.copyHistory = c.copyHistory[:10]
+	}
+}
+
+// GetCopyHistory returns the copy history
+func (c *ChatView) GetCopyHistory() []CopyHistoryItem {
+	return c.copyHistory
+}
+
+// ClearCopyHistory clears the copy history
+func (c *ChatView) ClearCopyHistory() {
+	c.copyHistory = []CopyHistoryItem{}
+}
+
+// ShowCopyHistoryCmd creates a command to show copy history
+func ShowCopyHistoryCmd() tea.Cmd {
+	return func() tea.Msg {
+		return ShowCopyHistoryMsg{}
+	}
+}
+
+// ShowCopyHistoryMsg is sent to show copy history
+type ShowCopyHistoryMsg struct{}
+
+// FormatCopyHistory returns a formatted string of copy history
+func (c *ChatView) FormatCopyHistory() string {
+	if len(c.copyHistory) == 0 {
+		return "📋 Copy History (empty)\n\nNo items copied yet."
+	}
+	
+	var result strings.Builder
+	result.WriteString("📋 Copy History (last 10)\n\n")
+	
+	for i, item := range c.copyHistory {
+		// Time format
+		timeStr := item.Timestamp.Format("15:04:05")
+		
+		// Source icon
+		var sourceIcon string
+		switch item.Source {
+		case "assistant":
+			sourceIcon = "🤖"
+		case "user":
+			sourceIcon = "👤"
+		case "selection":
+			sourceIcon = "📝"
+		case "system":
+			sourceIcon = "⚙️"
+		default:
+			sourceIcon = "📄"
+		}
+		
+		// Content preview (truncate if too long)
+		content := item.Content
+		if len(content) > 100 {
+			content = content[:97] + "..."
+		}
+		// Replace newlines with spaces for preview
+		content = strings.ReplaceAll(content, "\n", " ")
+		
+		result.WriteString(fmt.Sprintf("%d. [%s] %s %s\n", 
+			i+1, timeStr, sourceIcon, content))
+		
+		if i < len(c.copyHistory)-1 {
+			result.WriteString("\n")
+		}
+	}
+	
+	result.WriteString("\n\nPress Ctrl+P to close")
+	return result.String()
+}
 
 // SearchMessages searches through messages
 func (c *ChatView) SearchMessages(query string) []int {

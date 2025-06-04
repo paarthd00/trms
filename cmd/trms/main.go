@@ -38,11 +38,11 @@ func New() *Application {
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
 	ti.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 
-	// Create chat view
-	chatView := ui.NewChatView(80, 25)
+	// Create chat view with initial size (will be updated on WindowSizeMsg)
+	chatView := ui.NewChatView(80, 24)
 
-	// Create model manager view
-	modelManagerView := ui.NewModelManagerView(80, 25)
+	// Create model manager view with initial size
+	modelManagerView := ui.NewModelManagerView(80, 24)
 
 	// Create services
 	ollamaService := services.NewOllamaService()
@@ -102,11 +102,46 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		app.model.Width = msg.Width
 		app.model.Height = msg.Height
 
+		// Update input field width to be responsive
+		inputWidth := msg.Width - 8 // Account for borders and padding
+		if inputWidth < 20 {
+			inputWidth = 20
+		}
+		if inputWidth > 120 {
+			inputWidth = 120
+		}
+		app.model.Input.Width = inputWidth
+
 		// Update chat view size
 		app.chatView, cmd = app.chatView.Update(msg)
 		cmds = append(cmds, cmd)
+		
+		// Update model manager view size
+		app.modelManagerView, cmd = app.modelManagerView.Update(msg)
+		cmds = append(cmds, cmd)
 
 	case tea.KeyMsg:
+		// First, handle mode-specific keyboard updates for navigation
+		// This ensures arrow keys and other navigation keys are properly forwarded
+		switch app.model.Mode {
+		case models.ChatMode:
+			app.chatView, cmd = app.chatView.Update(msg)
+			cmds = append(cmds, cmd)
+		case models.ModelManagementMode, models.ModelSelectionMode, models.CategorySelectionMode:
+			app.modelManagerView, cmd = app.modelManagerView.Update(msg)
+			cmds = append(cmds, cmd)
+		case models.ConfirmationMode:
+			// Handle confirmation dialog keys
+			switch msg.String() {
+			case "y", "Y":
+				return app, app.handleConfirmedAction()
+			case "n", "N", "esc":
+				app.model.Mode = models.ModelManagementMode
+				return app, nil
+			}
+		}
+
+		// Then handle global key bindings
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			app.model.Quitting = true
@@ -223,29 +258,14 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Mode-specific updates
-		switch app.model.Mode {
-		case models.ChatMode:
-			// If in chat mode, also update chat view for scrolling
+	case tea.MouseMsg:
+		if app.model.Mode == models.ChatMode {
 			app.chatView, cmd = app.chatView.Update(msg)
 			cmds = append(cmds, cmd)
-		case models.ModelManagementMode, models.ModelSelectionMode:
-			// Update model manager view for both modes
-			app.modelManagerView, cmd = app.modelManagerView.Update(msg)
-			cmds = append(cmds, cmd)
-		case models.ConfirmationMode:
-			// Handle confirmation dialog keys
-			switch msg.String() {
-			case "y", "Y":
-				return app, app.handleConfirmedAction()
-			case "n", "N", "esc":
-				app.model.Mode = models.ModelManagementMode
-				return app, nil
-			}
 		}
 
-	// Handle Ollama responses
-	case models.AIResponseMsg:
+		// Handle Ollama responses
+		case models.AIResponseMsg:
 		// Remove the "Thinking..." message by getting all messages except the last one if it's "Thinking..."
 		messages := app.chatView.GetMessages()
 		if len(messages) > 0 {
@@ -336,6 +356,13 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			app.model.ModelInfoTarget = msg.ModelName
 			app.model.Mode = models.ModelInfoMode
 		}
+		
+	case ui.ShowCopyHistoryMsg:
+		// Show copy history as a system message
+		if app.model.Mode == models.ChatMode {
+			historyText := app.chatView.FormatCopyHistory()
+			app.chatView.AddMessage("system", historyText)
+		}
 	}
 
 	// Update input
@@ -363,6 +390,8 @@ func (app *Application) View() string {
 		content = app.renderModelManagementMode()
 	case models.ModelSelectionMode:
 		content = app.renderModelSelectionMode()
+	case models.CategorySelectionMode:
+		content = app.renderCategorySelectionMode()
 	case models.ChatListMode:
 		content = app.renderChatListMode()
 	case models.ConfirmationMode:
@@ -372,6 +401,20 @@ func (app *Application) View() string {
 	}
 
 	return content
+}
+
+// renderSeparator creates a responsive separator line
+func (app *Application) renderSeparator() string {
+	width := app.width
+	if width > 100 {
+		width = 100
+	}
+	if width < 20 {
+		width = 20
+	}
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Render(strings.Repeat("─", width))
 }
 
 // renderCommandMode renders the command mode interface
@@ -394,9 +437,7 @@ func (app *Application) renderCommandMode() string {
 	s += header + "\n"
 	
 	// Subtle separator
-	s += lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Render(strings.Repeat("─", 60)) + "\n\n"
+	s += app.renderSeparator() + "\n\n"
 
 	// Clean input area with prompt
 	inputArea := lipgloss.JoinHorizontal(lipgloss.Left,
@@ -418,7 +459,7 @@ func (app *Application) renderCommandMode() string {
 	// Clean help
 	help := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("243")).
-		Render("Tab: Chat Mode • Ctrl+M: Model Manager • Type 'models' or 'chat'")
+		Render("Tab: Chat Mode • Ctrl+M: Model Manager • 'help' for commands")
 	s += help
 
 	return s
@@ -436,9 +477,7 @@ func (app *Application) renderChatMode() string {
 	s += header + "\n"
 	
 	// Subtle separator
-	s += lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Render(strings.Repeat("─", 60)) + "\n\n"
+	s += app.renderSeparator() + "\n\n"
 
 	// Chat view
 	s += app.chatView.View() + "\n"
@@ -471,9 +510,19 @@ func (app *Application) renderChatMode() string {
 			Render("● " + currentModel)
 	}
 	
+	// Responsive help text based on screen width
+	var helpText string
+	if app.width > 120 {
+		helpText = "Tab: Command Mode • Ctrl+S: Switch Model • Click 📋 to copy • Ctrl+P: History"
+	} else if app.width > 80 {
+		helpText = "Tab: Command • Ctrl+S: Switch • 📋 Copy • Ctrl+P: History"
+	} else {
+		helpText = "Tab: Cmd • Ctrl+S: Switch • 📋 Copy"
+	}
+	
 	help := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("243")).
-		Render("Tab: Command Mode • Ctrl+S: Switch Model • Click 📋 to copy")
+		Render(helpText)
 	
 	statusBar := lipgloss.JoinHorizontal(lipgloss.Left,
 		modelStatus,
@@ -515,9 +564,7 @@ func (app *Application) renderModelManagementMode() string {
 	s += header + memInfo + "\n"
 	
 	// Subtle separator
-	s += lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Render(strings.Repeat("─", 60)) + "\n\n"
+	s += app.renderSeparator() + "\n\n"
 
 	// Memory warning if needed
 	availableGB := float64(app.systemInfo.AvailableMemory) / (1024 * 1024 * 1024)
@@ -543,7 +590,7 @@ func (app *Application) renderModelManagementMode() string {
 	// Clean help
 	help := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("243")).
-		Render("Enter: Download • d: Delete • c: Clean • r: Restart • i: Info • ESC: Back")
+		Render("Enter: Download • Tab/T: Categories • d: Delete • c: Clean • r: Restart • i: Info • ESC: Back")
 	s += help
 
 	return s
@@ -586,9 +633,7 @@ func (app *Application) renderModelSelectionMode() string {
 	s += header + "\n"
 	
 	// Subtle separator
-	s += lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Render(strings.Repeat("─", 60)) + "\n\n"
+	s += app.renderSeparator() + "\n\n"
 
 	// Model manager view
 	s += app.modelManagerView.View() + "\n"
@@ -597,6 +642,40 @@ func (app *Application) renderModelSelectionMode() string {
 	help := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("243")).
 		Render("Enter: Switch • d: Delete • c: Clean • i: Info • ESC: Back to Chat")
+	s += help
+
+	return s
+}
+
+// renderCategorySelectionMode renders the category selection interface
+func (app *Application) renderCategorySelectionMode() string {
+	var s string
+
+	// Clean header
+	header := lipgloss.JoinHorizontal(lipgloss.Left,
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color("12")).
+			Bold(true).
+			Render("TRMS"),
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8")).
+			Render(" │ "),
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")).
+			Render("📂 Model Categories"),
+	)
+	s += header + "\n"
+	
+	// Subtle separator
+	s += app.renderSeparator() + "\n\n"
+
+	// Model manager view (showing categories)
+	s += app.modelManagerView.View() + "\n"
+
+	// Clean help
+	help := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("243")).
+		Render("Enter: Select Category • Tab/T: Back to Models • ↑/↓: Navigate • ESC: Back")
 	s += help
 
 	return s
@@ -639,8 +718,15 @@ func (app *Application) handleCommand(input string) tea.Cmd {
 	case "models", "m":
 		app.model.Mode = models.ModelManagementMode
 		return app.refreshModelStates()
+	case "install-ollama":
+		// Install Ollama directly from TRMS
+		return app.installOllama()
+	case "help", "h", "?":
+		// Show help
+		return app.showHelp()
 	default:
-		// Execute as shell command
+		// Show unknown command message
+		app.chatView.AddMessage("system", fmt.Sprintf("Unknown command: '%s'. Type 'help' for available commands.", input))
 		return nil
 	}
 }
@@ -678,18 +764,36 @@ func (app *Application) performAI(prompt string) tea.Cmd {
 func (app *Application) checkOllama() tea.Cmd {
 	return func() tea.Msg {
 		if !app.ollama.IsInstalled() {
-			app.model.CommandOutput = "Ollama is not installed. Please install Ollama to use chat features."
+			// Provide clear installation instructions
+			app.chatView.AddMessage("system", `⚠️  Ollama is not installed
+
+To install Ollama on Linux, run:
+curl -fsSL https://ollama.com/install.sh | sh
+
+For other platforms, visit: https://ollama.com/download
+
+After installation, restart TRMS to use chat features.`)
 		} else if !app.ollama.IsRunning() {
 			// Try to start Ollama
+			app.chatView.AddMessage("system", "Starting Ollama service...")
 			if err := app.ollama.StartService(); err != nil {
-				app.model.CommandOutput = "Ollama is installed but not running. Failed to start: " + err.Error()
+				app.chatView.AddMessage("system", fmt.Sprintf(`⚠️  Ollama is installed but not running
+
+Failed to start automatically: %v
+
+Try starting manually with:
+ollama serve
+
+Then restart TRMS.`, err))
 			} else {
 				// Refresh models after starting
 				app.ollama.RefreshModels()
+				app.chatView.AddMessage("system", "✅ Ollama service started successfully!")
 			}
 		} else {
 			// Ollama is running, refresh models
 			app.ollama.RefreshModels()
+			// Don't add a message here - it's running fine
 		}
 		return nil
 	}
@@ -800,14 +904,13 @@ func (app *Application) refreshModelStates() tea.Cmd {
 func (app *Application) handleModelAction(action string) tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item from model manager
-		list := app.modelManagerView.GetList()
-		selected := list.SelectedItem()
+		selected := app.modelManagerView.GetSelectedModel()
 		if selected == nil {
 			return nil
 		}
 
-		item, ok := selected.(ui.ModelManagerItem)
-		if !ok || item.IsHeader || item.IsSeparator {
+		item := *selected
+		if item.IsHeader || item.IsSeparator {
 			return nil
 		}
 
@@ -980,14 +1083,13 @@ func (app *Application) switchModelInChat(modelName string) tea.Cmd {
 // handleModelSelection handles model selection in chat mode
 func (app *Application) handleModelSelection() tea.Cmd {
 	// Get selected item from model manager
-	list := app.modelManagerView.GetList()
-	selected := list.SelectedItem()
+	selected := app.modelManagerView.GetSelectedModel()
 	if selected == nil {
 		return nil
 	}
 
-	item, ok := selected.(ui.ModelManagerItem)
-	if !ok || item.IsHeader || item.IsSeparator {
+	item := *selected
+	if item.IsHeader || item.IsSeparator {
 		return nil
 	}
 
@@ -1058,14 +1160,13 @@ func (app *Application) checkProgress(modelName string) tea.Cmd {
 func (app *Application) showDeleteConfirmation() tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item
-		list := app.modelManagerView.GetList()
-		selected := list.SelectedItem()
+		selected := app.modelManagerView.GetSelectedModel()
 		if selected == nil {
 			return nil
 		}
 
-		item, ok := selected.(ui.ModelManagerItem)
-		if !ok || item.IsHeader || item.IsSeparator {
+		item := *selected
+		if item.IsHeader || item.IsSeparator {
 			return nil
 		}
 
@@ -1142,14 +1243,13 @@ func formatBytes(bytes int64) string {
 func (app *Application) showModelInfo() tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item
-		list := app.modelManagerView.GetList()
-		selected := list.SelectedItem()
+		selected := app.modelManagerView.GetSelectedModel()
 		if selected == nil {
 			return nil
 		}
 
-		item, ok := selected.(ui.ModelManagerItem)
-		if !ok || item.IsHeader || item.IsSeparator {
+		item := *selected
+		if item.IsHeader || item.IsSeparator {
 			return nil
 		}
 
@@ -1232,6 +1332,84 @@ func (app *Application) renderModelInfoMode() string {
 	s += helpStyle.Render("Press ESC to return to model management")
 
 	return s
+}
+
+// installOllama installs Ollama on the system
+func (app *Application) installOllama() tea.Cmd {
+	return func() tea.Msg {
+		if app.ollama.IsInstalled() {
+			app.chatView.AddMessage("system", "✅ Ollama is already installed!")
+			return nil
+		}
+
+		app.chatView.AddMessage("system", "Installing Ollama... This may take a few minutes.")
+		
+		// Run the installation
+		if err := app.ollama.InstallOllama(); err != nil {
+			app.chatView.AddMessage("system", fmt.Sprintf(`❌ Failed to install Ollama: %v
+
+To install manually on Linux, run:
+curl -fsSL https://ollama.com/install.sh | sh
+
+For other platforms, visit: https://ollama.com/download`, err))
+		} else {
+			app.chatView.AddMessage("system", "✅ Ollama installed successfully! Starting service...")
+			// Try to start the service
+			if err := app.ollama.StartService(); err != nil {
+				app.chatView.AddMessage("system", fmt.Sprintf("⚠️  Installed but failed to start: %v\n\nTry: ollama serve", err))
+			} else {
+				app.chatView.AddMessage("system", "✅ Ollama is now running! You can start downloading models.")
+			}
+		}
+		return nil
+	}
+}
+
+// showHelp displays available commands
+func (app *Application) showHelp() tea.Cmd {
+	return func() tea.Msg {
+		helpText := `📚 TRMS - Terminal Resource Management Studio
+
+🔧 Navigation:
+  chat, c          - Enter chat mode
+  models, m        - Open model manager (90+ models available!)
+  Tab              - Toggle between command and chat mode
+  Ctrl+C           - Quit
+
+💬 Chat Mode:
+  Ctrl+S           - Switch model
+  Ctrl+N           - New chat
+  Ctrl+H           - Show chat history
+  Ctrl+P           - Show copy history
+
+🤖 Model Manager (90+ Models Available):
+  ⚡ Lightweight    - phi, tinyllama, orca-mini (2-4GB RAM)
+  🤖 General       - llama3.2, mistral, qwen2.5 (4-8GB RAM)  
+  💻 Programming   - codellama, deepseek-coder, magicoder
+  👁️ Vision        - llava, moondream, llama3.2-vision
+  🧮 Mathematics   - mathstral, qwen2-math, deepseek-math
+  🌍 Multilingual  - aya (101 languages), command-r
+  🔗 Embeddings    - nomic-embed-text, mxbai-embed-large
+  ✍️ Creative      - dolphin models, wizard-vicuna
+  🎯 Specialized   - Medical, SQL, and domain-specific models
+
+📋 Model Manager Keys:
+  Enter            - Download/select model
+  d                - Delete model
+  c                - Clean partial download
+  r                - Resume/restart download
+  i                - Show model info
+  R                - Refresh model list
+
+🚀 Quick Start:
+  install-ollama   - Install Ollama (Linux: curl -fsSL ollama.com/install.sh | sh)
+  help, h, ?       - Show this help
+
+All models are organized by category and memory requirements!`
+
+		app.chatView.AddMessage("system", helpText)
+		return nil
+	}
 }
 
 func main() {

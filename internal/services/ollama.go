@@ -58,8 +58,8 @@ func (o *OllamaService) IsInstalled() bool {
 
 // InstallOllama installs Ollama
 func (o *OllamaService) InstallOllama() error {
-	// Download and run the install script
-	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.ai/install.sh | sh")
+	// Download and run the install script with the correct URL
+	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -330,6 +330,11 @@ func (o *OllamaService) PullModel(model string) error {
 				// Update percent if available
 				if progress.Percent > 0 {
 					o.pullProgress.Percent = progress.Percent
+				}
+				
+				// Update model manager state with progress
+				if o.modelManager != nil && progress.Total > 0 && progress.Completed > 0 {
+					o.modelManager.UpdateDownloadProgress(model, progress.Completed, progress.Total, o.pullProgress.Percent)
 				}
 			}
 			o.mu.Unlock()

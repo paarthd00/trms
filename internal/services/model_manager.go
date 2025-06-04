@@ -65,6 +65,14 @@ func (m *ModelManager) ScanModels() (map[string]*ModelStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Save downloading states before clearing
+	downloadingStates := make(map[string]*ModelStatus)
+	for name, status := range m.modelStates {
+		if status.State == ModelStateDownloading {
+			downloadingStates[name] = status
+		}
+	}
+
 	// Clear existing states
 	m.modelStates = make(map[string]*ModelStatus)
 
@@ -78,6 +86,19 @@ func (m *ModelManager) ScanModels() (map[string]*ModelStatus, error) {
 	if err := m.checkRunningModels(); err != nil {
 		// Don't fail if API is not available
 		fmt.Printf("Warning: Could not check running models: %v\n", err)
+	}
+
+	// Restore downloading states
+	for name, status := range downloadingStates {
+		if existingStatus, exists := m.modelStates[name]; exists {
+			// Update existing status with download progress
+			existingStatus.State = ModelStateDownloading
+			existingStatus.Downloaded = status.Downloaded
+			existingStatus.Percent = status.Percent
+		} else {
+			// Model might have been removed, keep the downloading state
+			m.modelStates[name] = status
+		}
 	}
 
 	return m.modelStates, nil
@@ -329,6 +350,28 @@ func (m *ModelManager) GetDownloadQueue() []*ModelStatus {
 		}
 	}
 	return queue
+}
+
+// UpdateDownloadProgress updates the progress for a downloading model
+func (m *ModelManager) UpdateDownloadProgress(modelName string, downloaded, total int64, percent int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	if status, exists := m.modelStates[modelName]; exists {
+		status.State = ModelStateDownloading
+		status.Downloaded = downloaded
+		status.Size = total
+		status.Percent = percent
+	} else {
+		// Create new status if doesn't exist
+		m.modelStates[modelName] = &ModelStatus{
+			Name:       modelName,
+			State:      ModelStateDownloading,
+			Downloaded: downloaded,
+			Size:       total,
+			Percent:    percent,
+		}
+	}
 }
 
 // GetPartialDownloads returns models with partial downloads
