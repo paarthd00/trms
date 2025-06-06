@@ -21,6 +21,7 @@ import (
 type Application struct {
 	model               models.AppModel
 	chatView            ui.ChatView
+	modernChatView      ui.ModernChatView
 	modelManagerView    ui.ModelManagerView
 	imageGeneratorView  ui.ImageGeneratorView
 	width               int
@@ -29,6 +30,8 @@ type Application struct {
 	db                  *services.DatabaseService
 	systemInfo          *services.SystemInfo
 	imageGenerator      *services.ImageGeneratorService
+	mcpBridge           *services.MCPBridge
+	useModernUI         bool
 }
 
 // New creates a new Application instance
@@ -43,6 +46,7 @@ func New() *Application {
 
 	// Create chat view with initial size (will be updated on WindowSizeMsg)
 	chatView := ui.NewChatView(80, 24)
+	modernChatView := ui.NewModernChatView(80, 24)
 
 	// Create model manager view with initial size
 	modelManagerView := ui.NewModelManagerView(80, 24)
@@ -55,6 +59,7 @@ func New() *Application {
 	ollamaService := services.NewOllamaService()
 	dbService := services.NewDatabaseService()
 	imageGeneratorService := services.NewImageGeneratorService()
+	mcpBridge := services.NewMCPBridge(ollamaService)
 	
 	// Perform startup checks and container management
 	if err := containerManager.StartupCheck(); err != nil {
@@ -82,6 +87,7 @@ func New() *Application {
 			Height:           25,
 		},
 		chatView:           chatView,
+		modernChatView:     modernChatView,
 		modelManagerView:   modelManagerView,
 		imageGeneratorView: imageGeneratorView,
 		width:              80,
@@ -90,6 +96,8 @@ func New() *Application {
 		db:                 dbService,
 		systemInfo:         systemInfo,
 		imageGenerator:     imageGeneratorService,
+		mcpBridge:          mcpBridge,
+		useModernUI:        true, // Enable modern UI by default
 	}
 
 	return app
@@ -129,8 +137,13 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		app.model.Input.Width = inputWidth
 
 		// Update chat view size
-		app.chatView, cmd = app.chatView.Update(msg)
-		cmds = append(cmds, cmd)
+		if app.useModernUI {
+			app.modernChatView, cmd = app.modernChatView.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
+			app.chatView, cmd = app.chatView.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		
 		// Update model manager view size
 		app.modelManagerView, cmd = app.modelManagerView.Update(msg)
@@ -771,6 +784,66 @@ func (app *Application) performAI(prompt string) tea.Cmd {
 		}
 
 		// Send to Ollama
+		response, err := app.ollama.Chat(prompt)
+		return models.AIResponseMsg{
+			Response: response,
+			Err:      err,
+		}
+	}
+}
+
+// performAIWithTools sends a message through MCP bridge with tool support
+func (app *Application) performAIWithTools(prompt string) tea.Cmd {
+	return func() tea.Msg {
+		// Check if Ollama is running
+		if !app.ollama.IsRunning() {
+			return models.AIResponseMsg{
+				Response: "",
+				Err:      fmt.Errorf("Ollama is not running. Please start Ollama first"),
+			}
+		}
+
+		// Check if model is selected
+		currentModel := app.ollama.GetCurrentModel()
+		if currentModel == "No model selected" || currentModel == "" {
+			return models.AIResponseMsg{
+				Response: "",
+				Err:      fmt.Errorf("No model selected. Please run 'ollama pull phi' or another small model first"),
+			}
+		}
+
+		// Use MCP bridge for tool-enabled responses if available
+		if app.mcpBridge != nil {
+			mcpResponse, err := app.mcpBridge.ChatWithTools(prompt)
+			if err != nil {
+				return models.AIResponseMsg{
+					Response: "",
+					Err:      err,
+				}
+			}
+			
+			// Convert MCP response to our message format
+			var toolCalls []models.MCPToolCall
+			for _, tc := range mcpResponse.ToolCalls {
+				toolCalls = append(toolCalls, models.MCPToolCall{
+					ID:     tc.ID,
+					Name:   tc.Name,
+					Args:   tc.Args,
+					Result: tc.Result,
+					Error:  tc.Error,
+				})
+			}
+			
+			return models.MCPResponseMsg{
+				Response: &models.MCPResponse{
+					Content:   mcpResponse.Content,
+					ToolCalls: toolCalls,
+				},
+				Err: nil,
+			}
+		}
+
+		// Fallback to regular Ollama chat
 		response, err := app.ollama.Chat(prompt)
 		return models.AIResponseMsg{
 			Response: response,

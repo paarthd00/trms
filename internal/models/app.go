@@ -334,3 +334,26 @@ func (c ChatSessionItem) Description() string {
 func (c ChatSessionItem) FilterValue() string {
 	return c.Session.Name
 }
+
+// Message types for MCP integration
+
+// MCPResponseMsg represents a response from MCP bridge with tool calls
+type MCPResponseMsg struct {
+	Response *MCPResponse
+	Err      error
+}
+
+// MCPResponse represents tool-enabled response
+type MCPResponse struct {
+	Content   string
+	ToolCalls []MCPToolCall
+}
+
+// MCPToolCall represents a tool call in MCP format
+type MCPToolCall struct {
+	ID     string
+	Name   string
+	Args   map[string]interface{}
+	Result string
+	Error  string
+}
