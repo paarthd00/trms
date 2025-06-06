@@ -27,6 +27,8 @@ type OllamaService struct {
 	activeDownloads map[string]*models.PullProgress
 	modelManager    *ModelManager
 	downloadStats   map[string]*DownloadStats
+	downloadManager *DownloadManager
+	stateManager    *ModelStateManager
 }
 
 // DownloadStats tracks download statistics for speed/ETA calculation
@@ -43,13 +45,21 @@ type DownloadStats struct {
 
 // NewOllamaService creates a new OllamaService instance
 func NewOllamaService() *OllamaService {
-	return &OllamaService{
+	service := &OllamaService{
 		installedModels: []models.OllamaModel{},
 		activeDownloads: make(map[string]*models.PullProgress),
 		cancelPull:      make(chan bool, 1),
 		modelManager:    NewModelManager(),
 		downloadStats:   make(map[string]*DownloadStats),
 	}
+	
+	// Create download manager
+	service.downloadManager = NewDownloadManager(service)
+	
+	// Create state manager
+	service.stateManager = NewModelStateManager(service.downloadManager, service)
+	
+	return service
 }
 
 // IsInstalled checks if Ollama is installed
@@ -406,7 +416,7 @@ func (o *OllamaService) PullModel(model string) error {
 							if avgSpeed > 0 {
 								remaining := totalSize - totalCompleted
 								etaSeconds := remaining / avgSpeed
-								stats.ETA = formatDuration(time.Duration(etaSeconds) * time.Second)
+								stats.ETA = formatDurationOllama(time.Duration(etaSeconds) * time.Second)
 							}
 						}
 						
@@ -615,7 +625,7 @@ func min(a, b int) int {
 	return b
 }
 
-func formatDuration(d time.Duration) string {
+func formatDurationOllama(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.0fs", d.Seconds())
 	}
@@ -699,4 +709,14 @@ func (o *OllamaService) GetPartialDownloads() ([]*ModelStatus, error) {
 // GetDownloadQueue returns models currently being downloaded
 func (o *OllamaService) GetDownloadQueue() []*ModelStatus {
 	return o.modelManager.GetDownloadQueue()
+}
+
+// GetStateManager returns the model state manager
+func (o *OllamaService) GetStateManager() *ModelStateManager {
+	return o.stateManager
+}
+
+// GetDownloadManager returns the download manager
+func (o *OllamaService) GetDownloadManager() *DownloadManager {
+	return o.downloadManager
 }

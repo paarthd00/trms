@@ -23,6 +23,7 @@ type Application struct {
 	chatView            ui.ChatView
 	modernChatView      ui.ModernChatView
 	modelManagerView    ui.ModelManagerView
+	cleanModelManager   ui.CleanModelManagerView
 	imageGeneratorView  ui.ImageGeneratorView
 	width               int
 	height              int
@@ -32,6 +33,7 @@ type Application struct {
 	imageGenerator      *services.ImageGeneratorService
 	mcpBridge           *services.MCPBridge
 	useModernUI         bool
+	useCleanModels      bool
 }
 
 // New creates a new Application instance
@@ -61,6 +63,9 @@ func New() *Application {
 	imageGeneratorService := services.NewImageGeneratorService()
 	mcpBridge := services.NewMCPBridge(ollamaService)
 	
+	// Create clean model manager
+	cleanModelManager := ui.NewCleanModelManagerView(80, 24, ollamaService.GetStateManager())
+	
 	// Perform startup checks and container management
 	if err := containerManager.StartupCheck(); err != nil {
 		fmt.Printf("Startup check failed: %v\n", err)
@@ -89,6 +94,7 @@ func New() *Application {
 		chatView:           chatView,
 		modernChatView:     modernChatView,
 		modelManagerView:   modelManagerView,
+		cleanModelManager:  cleanModelManager,
 		imageGeneratorView: imageGeneratorView,
 		width:              80,
 		height:             25,
@@ -98,6 +104,7 @@ func New() *Application {
 		imageGenerator:     imageGeneratorService,
 		mcpBridge:          mcpBridge,
 		useModernUI:        true, // Enable modern UI by default
+		useCleanModels:     true, // Use clean model manager by default
 	}
 
 	return app
@@ -105,11 +112,18 @@ func New() *Application {
 
 // Init initializes the application
 func (app *Application) Init() tea.Cmd {
-	return tea.Batch(
-		textinput.Blink,
-		tea.EnterAltScreen,
-		app.checkOllama(),
-	)
+	var cmds []tea.Cmd
+	
+	cmds = append(cmds, textinput.Blink)
+	cmds = append(cmds, tea.EnterAltScreen)
+	cmds = append(cmds, app.checkOllama())
+	
+	// Initialize clean model manager if using clean models
+	if app.useCleanModels {
+		cmds = append(cmds, app.cleanModelManager.Init())
+	}
+	
+	return tea.Batch(cmds...)
 }
 
 // Update handles all messages and updates
@@ -148,6 +162,8 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update model manager view size
 		app.modelManagerView, cmd = app.modelManagerView.Update(msg)
 		cmds = append(cmds, cmd)
+		app.cleanModelManager, cmd = app.cleanModelManager.Update(msg)
+		cmds = append(cmds, cmd)
 		
 		// Update image generator view size
 		app.imageGeneratorView, cmd = app.imageGeneratorView.Update(msg)
@@ -161,8 +177,13 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			app.chatView, cmd = app.chatView.Update(msg)
 			cmds = append(cmds, cmd)
 		case models.ModelManagementMode, models.ModelSelectionMode, models.CategorySelectionMode:
-			app.modelManagerView, cmd = app.modelManagerView.Update(msg)
-			cmds = append(cmds, cmd)
+			if app.useCleanModels {
+				app.cleanModelManager, cmd = app.cleanModelManager.Update(msg)
+				cmds = append(cmds, cmd)
+			} else {
+				app.modelManagerView, cmd = app.modelManagerView.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 		case models.ImageGenerationMode:
 			app.imageGeneratorView, cmd = app.imageGeneratorView.Update(msg)
 			cmds = append(cmds, cmd)
@@ -353,14 +374,17 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		progress := app.ollama.GetProgress(msg.Model)
 		if progress != nil {
 			// Update model manager view with progress
-			app.modelManagerView.UpdateProgressWithStats(
-				msg.Model, 
-				progress.Percent, 
-				progress.Downloaded, 
-				progress.Total,
-				progress.Speed,
-				progress.ETA,
-			)
+			if !app.useCleanModels {
+				app.modelManagerView.UpdateProgressWithStats(
+					msg.Model, 
+					progress.Percent, 
+					progress.Downloaded, 
+					progress.Total,
+					progress.Speed,
+					progress.ETA,
+				)
+			}
+			// Clean model manager handles progress automatically via state manager
 			
 			// Check if download is complete
 			if progress.Percent >= 100 || progress.Status == "Download complete" {
@@ -588,8 +612,12 @@ func (app *Application) renderModelManagementMode() string {
 	}
 
 	// Model manager view
+	if app.useCleanModels {
+		s += app.cleanModelManager.View()
+		return s
+	}
+	
 	s += app.modelManagerView.View() + "\n"
-
 
 	// Clean help
 	help := lipgloss.NewStyle().
@@ -957,12 +985,17 @@ func (app *Application) refreshModelStates() tea.Cmd {
 			}
 		}
 
-		app.modelManagerView.SetModelStates(states, enrichedModels)
-		
-		// Update current model indicator
-		currentModel := app.ollama.GetCurrentModel()
-		if currentModel != "" && currentModel != "No model selected" {
-			app.modelManagerView.SetCurrentModel(currentModel)
+		if app.useCleanModels {
+			// For clean model manager, refresh the state manager
+			app.ollama.GetStateManager().RefreshStates()
+		} else {
+			app.modelManagerView.SetModelStates(states, enrichedModels)
+			
+			// Update current model indicator
+			currentModel := app.ollama.GetCurrentModel()
+			if currentModel != "" && currentModel != "No model selected" {
+				app.modelManagerView.SetCurrentModel(currentModel)
+			}
 		}
 
 		return models.ModelsRefreshedMsg{Err: nil}
@@ -973,7 +1006,13 @@ func (app *Application) refreshModelStates() tea.Cmd {
 func (app *Application) handleModelAction(action string) tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item from model manager
-		selected := app.modelManagerView.GetSelectedModel()
+		var selected *ui.ModelManagerItem
+		if app.useCleanModels {
+			selected = app.cleanModelManager.GetSelectedModel()
+		} else {
+			selected = app.modelManagerView.GetSelectedModel()
+		}
+		
 		if selected == nil {
 			return models.AIResponseMsg{
 				Response: "",
@@ -1161,7 +1200,12 @@ func (app *Application) switchModelInChat(modelName string) tea.Cmd {
 // handleModelSelection handles model selection in chat mode
 func (app *Application) handleModelSelection() tea.Cmd {
 	// Get selected item from model manager
-	selected := app.modelManagerView.GetSelectedModel()
+	var selected *ui.ModelManagerItem
+	if app.useCleanModels {
+		selected = app.cleanModelManager.GetSelectedModel()
+	} else {
+		selected = app.modelManagerView.GetSelectedModel()
+	}
 	if selected == nil {
 		return nil
 	}
@@ -1217,19 +1261,33 @@ func (app *Application) getQueueStatus() string {
 
 // startModelDownload starts downloading a model
 func (app *Application) startModelDownload(modelName string) tea.Cmd {
-	// Mark model as downloading in UI immediately
-	app.modelManagerView.SetModelDownloading(modelName)
+	// Mark model as downloading in UI immediately (only for old model manager)
+	if !app.useCleanModels {
+		app.modelManagerView.SetModelDownloading(modelName)
+	}
+	// Clean model manager handles this automatically via download manager
 	
-	// Start the download in background
-	go func() {
-		err := app.ollama.PullModel(modelName)
+	// Start the download
+	if app.useCleanModels {
+		// Use the new download manager
+		err := app.ollama.GetDownloadManager().StartDownload(modelName)
 		if err != nil {
-			// Error will be shown through progress tracking
+			app.chatView.AddMessage("system", fmt.Sprintf("Failed to start download: %v", err))
 		}
-	}()
-	
-	// Start progress tracking immediately
-	return app.startProgressTracking(modelName)
+		// Progress tracking is handled automatically by the download manager
+		return nil
+	} else {
+		// Use the old download method
+		go func() {
+			err := app.ollama.PullModel(modelName)
+			if err != nil {
+				// Error will be shown through progress tracking
+			}
+		}()
+		
+		// Start progress tracking immediately
+		return app.startProgressTracking(modelName)
+	}
 }
 
 // startProgressTracking starts tracking progress for a model download
@@ -1255,7 +1313,12 @@ func (app *Application) checkProgress(modelName string) tea.Cmd {
 func (app *Application) showDeleteConfirmation() tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item
-		selected := app.modelManagerView.GetSelectedModel()
+		var selected *ui.ModelManagerItem
+		if app.useCleanModels {
+			selected = app.cleanModelManager.GetSelectedModel()
+		} else {
+			selected = app.modelManagerView.GetSelectedModel()
+		}
 		if selected == nil {
 			return nil
 		}
@@ -1338,7 +1401,12 @@ func formatBytes(bytes int64) string {
 func (app *Application) showModelInfo() tea.Cmd {
 	return func() tea.Msg {
 		// Get selected item
-		selected := app.modelManagerView.GetSelectedModel()
+		var selected *ui.ModelManagerItem
+		if app.useCleanModels {
+			selected = app.cleanModelManager.GetSelectedModel()
+		} else {
+			selected = app.modelManagerView.GetSelectedModel()
+		}
 		if selected == nil {
 			return nil
 		}
