@@ -31,12 +31,14 @@ type OllamaService struct {
 
 // DownloadStats tracks download statistics for speed/ETA calculation
 type DownloadStats struct {
-	StartTime    time.Time
-	LastUpdate   time.Time
-	LastBytes    int64
-	TotalBytes   int64
-	Speed        string
-	ETA          string
+	StartTime       time.Time
+	LastUpdate      time.Time
+	LastBytes       float64
+	TotalBytes      float64
+	Speed           string
+	ETA             string
+	LayerProgress   map[string]float64 // Track progress per layer
+	LayerTotals     map[string]float64 // Track total size per layer
 }
 
 // NewOllamaService creates a new OllamaService instance
@@ -65,14 +67,26 @@ func (o *OllamaService) InstallOllama() error {
 	return cmd.Run()
 }
 
-// IsRunning checks if Ollama service is running
+// IsRunning checks if Ollama service is running (local or container)
 func (o *OllamaService) IsRunning() bool {
+	// Try local first
 	resp, err := http.Get("http://localhost:11434/api/tags")
-	if err != nil {
-		return false
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == 200 {
+			return true
+		}
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
+	
+	// Check if running in container
+	return o.IsRunningInContainer()
+}
+
+// IsRunningInContainer checks if Ollama is running in a Docker container
+func (o *OllamaService) IsRunningInContainer() bool {
+	cmd := exec.Command("docker", "ps", "--filter", "name=trms-ollama", "--filter", "status=running", "--format", "{{.Names}}")
+	output, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(output)) == "trms-ollama"
 }
 
 // StartService starts the Ollama service
@@ -184,13 +198,8 @@ func (o *OllamaService) GetProgress(model string) *models.PullProgress {
 			Percent:    progress.Percent,
 			Downloaded: progress.Downloaded,
 			Total:      progress.Total,
-		}
-		
-		// Add speed and ETA to the status for display
-		if speed != "" && eta != "" {
-			result.Status = fmt.Sprintf("%s • %s • ETA: %s", progress.Status, speed, eta)
-		} else if speed != "" {
-			result.Status = fmt.Sprintf("%s • %s", progress.Status, speed)
+			Speed:      speed,
+			ETA:        eta,
 		}
 		
 		return result
@@ -206,41 +215,64 @@ func (o *OllamaService) GetActiveDownloads() map[string]*models.PullProgress {
 	// Return a copy to avoid race conditions
 	activeDownloads := make(map[string]*models.PullProgress)
 	for model, progress := range o.activeDownloads {
+		// Get speed and ETA from download stats
+		var speed, eta string
+		if stats, statsExist := o.downloadStats[model]; statsExist {
+			speed = stats.Speed
+			eta = stats.ETA
+		}
+		
 		activeDownloads[model] = &models.PullProgress{
 			Model:      progress.Model,
 			Status:     progress.Status,
 			Percent:    progress.Percent,
 			Downloaded: progress.Downloaded,
 			Total:      progress.Total,
+			Speed:      speed,
+			ETA:        eta,
 		}
 	}
 	return activeDownloads
 }
 
-// PullModel pulls a model from Ollama
+// PullModel pulls a model from Ollama with improved error handling and retry logic
 func (o *OllamaService) PullModel(model string) error {
+	// Check if Ollama is running first
+	if !o.IsRunning() {
+		return fmt.Errorf("Ollama service is not running. Please start Ollama first")
+	}
+	
 	o.mu.Lock()
-	o.isPulling = true
-	o.pullProgress = &models.PullProgress{
+	// Check if already downloading
+	if existing, exists := o.activeDownloads[model]; exists {
+		o.mu.Unlock()
+		return fmt.Errorf("model %s is already being downloaded (progress: %d%%)", model, existing.Percent)
+	}
+	
+	// Create per-model progress tracking
+	progress := &models.PullProgress{
 		Model:   model,
 		Status:  "Starting download...",
 		Percent: 0,
 	}
-	o.activeDownloads[model] = o.pullProgress
+	o.activeDownloads[model] = progress
 	
 	// Initialize download stats
 	o.downloadStats[model] = &DownloadStats{
-		StartTime:  time.Now(),
-		LastUpdate: time.Now(),
-		LastBytes:  0,
-		TotalBytes: 0,
+		StartTime:     time.Now(),
+		LastUpdate:    time.Now(),
+		LastBytes:     0,
+		TotalBytes:    0,
+		LayerProgress: make(map[string]float64),
+		LayerTotals:   make(map[string]float64),
 	}
 	o.mu.Unlock()
 
 	defer func() {
 		o.mu.Lock()
-		o.isPulling = false
 		delete(o.activeDownloads, model)
+		delete(o.downloadStats, model)
+		o.isPulling = len(o.activeDownloads) > 0
 		o.mu.Unlock()
 	}()
 
@@ -260,101 +292,161 @@ func (o *OllamaService) PullModel(model string) error {
 	client := &http.Client{Timeout: 0} // No timeout for downloads
 	resp, err := client.Do(req)
 	if err != nil {
+		o.mu.Lock()
+		if modelProgress, exists := o.activeDownloads[model]; exists {
+			modelProgress.Status = fmt.Sprintf("Connection failed: %v", err)
+		}
+		o.mu.Unlock()
 		return err
 	}
 	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
 
-	// Read streaming response
+	// Read streaming response with better error handling
 	scanner := bufio.NewScanner(resp.Body)
+	lastActivity := time.Now()
+	stuckCheckInterval := 30 * time.Second
+	
 	for scanner.Scan() {
-		select {
-		case <-o.cancelPull:
-			return fmt.Errorf("download cancelled")
-		default:
-			var progress struct {
-				Status     string `json:"status"`
-				Digest     string `json:"digest"`
-				Total      int64  `json:"total"`
-				Completed  int64  `json:"completed"`
-				Percent    int    `json:"percent"`
-				Downloaded string `json:"downloaded"`
-			}
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue // Skip empty lines
+		}
+		
+		lastActivity = time.Now()
+		
+		// Parse Ollama's actual response format
+		var progress struct {
+			Status    string  `json:"status"`
+			Digest    string  `json:"digest"`
+			Total     float64 `json:"total"`
+			Completed float64 `json:"completed"`
+			Error     string  `json:"error"`
+		}
 
-			if err := json.Unmarshal(scanner.Bytes(), &progress); err != nil {
-				continue
-			}
+		if err := json.Unmarshal([]byte(line), &progress); err != nil {
+			// Log malformed JSON but continue
+			fmt.Printf("Warning: malformed progress JSON: %s\n", line)
+			continue
+		}
 
-			o.mu.Lock()
-			if o.pullProgress != nil {
-				o.pullProgress.Status = progress.Status
-				
-				// Handle both formats: numeric bytes and string format
-				if progress.Total > 0 && progress.Completed > 0 {
-					// Direct numeric values from API
-					o.pullProgress.Percent = int(float64(progress.Completed) / float64(progress.Total) * 100)
-					o.pullProgress.Downloaded = formatBytes(progress.Completed)
-					o.pullProgress.Total = formatBytes(progress.Total)
+		o.mu.Lock()
+		if modelProgress, exists := o.activeDownloads[model]; exists {
+			// Handle errors with more specific messages
+			if progress.Error != "" {
+				errorMsg := progress.Error
+				if strings.Contains(errorMsg, "connection") {
+					errorMsg = "Network connection failed. Check your internet connection and try again."
+				} else if strings.Contains(errorMsg, "not found") {
+					errorMsg = fmt.Sprintf("Model '%s' not found. Check the model name and try again.", model)
+				} else if strings.Contains(errorMsg, "space") {
+					errorMsg = "Insufficient disk space. Free up space and try again."
+				}
+				modelProgress.Status = fmt.Sprintf("Error: %s", errorMsg)
+				o.mu.Unlock()
+				return fmt.Errorf(errorMsg)
+			}
+			
+			// Update status with more descriptive messages
+			statusMsg := progress.Status
+			switch progress.Status {
+			case "pulling manifest":
+				statusMsg = "Downloading model information..."
+			case "downloading":
+				statusMsg = "Downloading model files..."
+			case "verifying sha256 digest":
+				statusMsg = "Verifying download integrity..."
+			case "writing manifest":
+				statusMsg = "Finalizing installation..."
+			case "removing any unused layers":
+				statusMsg = "Cleaning up..."
+			}
+			modelProgress.Status = statusMsg
+			
+			// Handle success
+			if progress.Status == "success" {
+				modelProgress.Status = "Download complete"
+				modelProgress.Percent = 100
+			}
+			
+			// Handle layer-based progress
+			if progress.Digest != "" && progress.Total > 0 {
+				if stats, exists := o.downloadStats[model]; exists {
+					// Track this layer's progress
+					stats.LayerProgress[progress.Digest] = progress.Completed
+					stats.LayerTotals[progress.Digest] = progress.Total
 					
-					// Calculate speed and ETA
-					if stats, exists := o.downloadStats[model]; exists {
-						now := time.Now()
-						timeDiff := now.Sub(stats.LastUpdate).Seconds()
+					// Calculate total progress across all layers
+					var totalCompleted, totalSize float64
+					for digest, size := range stats.LayerTotals {
+						totalSize += size
+						if completed, ok := stats.LayerProgress[digest]; ok {
+							totalCompleted += completed
+						}
+					}
+					
+					// Update overall progress
+					if totalSize > 0 {
+						percent := int(totalCompleted / totalSize * 100)
+						modelProgress.Percent = percent
+						modelProgress.Downloaded = formatBytes(int64(totalCompleted))
+						modelProgress.Total = formatBytes(int64(totalSize))
 						
-						if timeDiff > 0 {
-							bytesDiff := progress.Completed - stats.LastBytes
-							if bytesDiff > 0 {
-								speedBytesPerSec := float64(bytesDiff) / timeDiff
-								stats.Speed = formatBytes(int64(speedBytesPerSec)) + "/s"
-								
-								// Calculate ETA
-								remaining := progress.Total - progress.Completed
-								if speedBytesPerSec > 0 {
-									etaSeconds := float64(remaining) / speedBytesPerSec
-									stats.ETA = formatDuration(time.Duration(etaSeconds) * time.Second)
-								}
+						// Calculate speed based on total progress
+						now := time.Now()
+						elapsed := now.Sub(stats.StartTime).Seconds()
+						if elapsed > 0 {
+							avgSpeed := totalCompleted / elapsed
+							stats.Speed = formatBytes(int64(avgSpeed)) + "/s"
+							
+							// ETA calculation
+							if avgSpeed > 0 {
+								remaining := totalSize - totalCompleted
+								etaSeconds := remaining / avgSpeed
+								stats.ETA = formatDuration(time.Duration(etaSeconds) * time.Second)
 							}
 						}
 						
-						stats.LastUpdate = now
-						stats.LastBytes = progress.Completed
-						stats.TotalBytes = progress.Total
+						stats.LastBytes = totalCompleted
+						stats.TotalBytes = totalSize
 					}
-				} else if progress.Downloaded != "" {
-					// String format from API (e.g., "1.2 GB")
-					o.pullProgress.Downloaded = progress.Downloaded
-					if o.pullProgress.Total == "" && progress.Total > 0 {
-						o.pullProgress.Total = formatBytes(progress.Total)
-					}
-				}
-				
-				// Update percent if available
-				if progress.Percent > 0 {
-					o.pullProgress.Percent = progress.Percent
-				}
-				
-				// Update model manager state with progress
-				if o.modelManager != nil && progress.Total > 0 && progress.Completed > 0 {
-					o.modelManager.UpdateDownloadProgress(model, progress.Completed, progress.Total, o.pullProgress.Percent)
 				}
 			}
+			
+			// Update model manager state
+			if o.modelManager != nil && progress.Total > 0 {
+				o.modelManager.UpdateDownloadProgress(model, int64(progress.Completed), int64(progress.Total), modelProgress.Percent)
+			}
+		}
+		o.mu.Unlock()
+		
+		// Check for stuck downloads
+		if time.Since(lastActivity) > stuckCheckInterval {
+			o.mu.Lock()
+			if modelProgress, exists := o.activeDownloads[model]; exists {
+				modelProgress.Status = "Download appears stuck, retrying..."
+			}
 			o.mu.Unlock()
+			fmt.Printf("Warning: No progress for %s, continuing...\n", model)
 		}
 	}
-
-	// Mark download as complete and clean up
-	o.mu.Lock()
-	if o.pullProgress != nil {
-		o.pullProgress.Status = "Download complete"
-		o.pullProgress.Percent = 100
+	
+	// Check for scanner errors
+	if err := scanner.Err(); err != nil {
+		o.mu.Lock()
+		if modelProgress, exists := o.activeDownloads[model]; exists {
+			modelProgress.Status = fmt.Sprintf("Stream error: %v", err)
+		}
+		o.mu.Unlock()
+		return fmt.Errorf("download stream error: %v", err)
 	}
-	delete(o.activeDownloads, model)
-	delete(o.downloadStats, model)
-	o.isPulling = false
-	o.mu.Unlock()
 	
 	// Refresh models after successful pull
 	o.RefreshModels()
-	return scanner.Err()
+	return nil
 }
 
 // DeleteModel deletes a model
@@ -409,11 +501,15 @@ func (o *OllamaService) CancelPull() error {
 	return nil
 }
 
-// GetPullProgress returns the current pull progress
+// GetPullProgress returns the current pull progress (deprecated - use GetProgress with model name)
 func (o *OllamaService) GetPullProgress() *models.PullProgress {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.pullProgress
+	// Return the first active download if any, since global progress is deprecated
+	for _, progress := range o.activeDownloads {
+		return progress
+	}
+	return nil
 }
 
 // Chat sends a chat message to the current model
@@ -512,6 +608,13 @@ func formatBytes(bytes int64) string {
 }
 
 // formatDuration formats a duration to human readable string
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.0fs", d.Seconds())

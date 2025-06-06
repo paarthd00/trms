@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -18,21 +19,23 @@ import (
 
 // Application is the main TUI application
 type Application struct {
-	model            models.AppModel
-	chatView         ui.ChatView
-	modelManagerView ui.ModelManagerView
-	width            int
-	height           int
-	ollama           *services.OllamaService
-	db               *services.DatabaseService
-	systemInfo       *services.SystemInfo
+	model               models.AppModel
+	chatView            ui.ChatView
+	modelManagerView    ui.ModelManagerView
+	imageGeneratorView  ui.ImageGeneratorView
+	width               int
+	height              int
+	ollama              *services.OllamaService
+	db                  *services.DatabaseService
+	systemInfo          *services.SystemInfo
+	imageGenerator      *services.ImageGeneratorService
 }
 
 // New creates a new Application instance
 func New() *Application {
 	// Create input field
 	ti := textinput.New()
-	ti.Placeholder = "Type a command..."
+	ti.Placeholder = "Type your message..."
 	ti.Focus()
 	ti.CharLimit = 256
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
@@ -44,9 +47,20 @@ func New() *Application {
 	// Create model manager view with initial size
 	modelManagerView := ui.NewModelManagerView(80, 24)
 
+	// Create image generator view with initial size
+	imageGeneratorView := ui.NewImageGeneratorView(80, 24)
+
 	// Create services
+	containerManager := services.NewContainerManager()
 	ollamaService := services.NewOllamaService()
 	dbService := services.NewDatabaseService()
+	imageGeneratorService := services.NewImageGeneratorService()
+	
+	// Perform startup checks and container management
+	if err := containerManager.StartupCheck(); err != nil {
+		fmt.Printf("Startup check failed: %v\n", err)
+		fmt.Println("Some features may be limited. Continuing...")
+	}
 	
 	// Try to connect to database if it's running
 	if dbService.IsPostgresRunning() {
@@ -60,20 +74,22 @@ func New() *Application {
 
 	app := &Application{
 		model: models.AppModel{
-			Mode:             models.CommandMode,
+			Mode:             models.ChatMode,
 			Input:            ti,
 			CurrentSessionID: 1,
 			ChatHistory:      []models.Message{},
 			Width:            80,
 			Height:           25,
 		},
-		chatView:         chatView,
-		modelManagerView: modelManagerView,
-		width:            80,
-		height:           25,
-		ollama:           ollamaService,
-		db:               dbService,
-		systemInfo:       systemInfo,
+		chatView:           chatView,
+		modelManagerView:   modelManagerView,
+		imageGeneratorView: imageGeneratorView,
+		width:              80,
+		height:             25,
+		ollama:             ollamaService,
+		db:                 dbService,
+		systemInfo:         systemInfo,
+		imageGenerator:     imageGeneratorService,
 	}
 
 	return app
@@ -119,6 +135,10 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update model manager view size
 		app.modelManagerView, cmd = app.modelManagerView.Update(msg)
 		cmds = append(cmds, cmd)
+		
+		// Update image generator view size
+		app.imageGeneratorView, cmd = app.imageGeneratorView.Update(msg)
+		cmds = append(cmds, cmd)
 
 	case tea.KeyMsg:
 		// First, handle mode-specific keyboard updates for navigation
@@ -129,6 +149,9 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		case models.ModelManagementMode, models.ModelSelectionMode, models.CategorySelectionMode:
 			app.modelManagerView, cmd = app.modelManagerView.Update(msg)
+			cmds = append(cmds, cmd)
+		case models.ImageGenerationMode:
+			app.imageGeneratorView, cmd = app.imageGeneratorView.Update(msg)
 			cmds = append(cmds, cmd)
 		case models.ConfirmationMode:
 			// Handle confirmation dialog keys
@@ -147,9 +170,11 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			app.model.Quitting = true
 			return app, tea.Quit
 
-		case tea.KeyTab:
-			// Toggle between modes
-			if app.model.Mode == models.CommandMode {
+
+		case tea.KeyEsc:
+			// Handle escape for different modes
+			switch app.model.Mode {
+			case models.ModelManagementMode, models.ChatListMode, models.ImageGenerationMode:
 				app.model.Mode = models.ChatMode
 				currentModel := app.ollama.GetCurrentModel()
 				if currentModel == "No model selected" || currentModel == "" {
@@ -157,19 +182,6 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					app.model.Input.Placeholder = fmt.Sprintf("Chat with %s", currentModel)
 				}
-			} else if app.model.Mode == models.ChatMode {
-				app.model.Mode = models.CommandMode
-				app.model.Input.Placeholder = "Type a command..."
-			}
-			app.model.Input.Focus()
-			return app, nil
-
-		case tea.KeyEsc:
-			// Handle escape for different modes
-			switch app.model.Mode {
-			case models.ChatMode, models.ModelManagementMode, models.ChatListMode:
-				app.model.Mode = models.CommandMode
-				app.model.Input.Placeholder = "Type a command..."
 				app.model.Input.Focus()
 			case models.ModelSelectionMode:
 				app.model.Mode = models.ChatMode
@@ -189,16 +201,14 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			// Handle enter based on mode
 			switch app.model.Mode {
-			case models.CommandMode:
-				input := app.model.Input.Value()
-				if input != "" {
-					app.model.Input.Reset()
-					return app, app.handleCommand(input)
-				}
 			case models.ChatMode:
 				prompt := app.model.Input.Value()
 				if prompt != "" {
 					app.model.Input.Reset()
+					// Check if it's a command (starts with /)
+					if strings.HasPrefix(prompt, "/") {
+						return app, app.handleSlashCommand(prompt[1:]) // Remove the / prefix
+					}
 					// Add message to chat view
 					app.chatView.AddMessage("user", prompt)
 					// Save user message to database
@@ -209,8 +219,8 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return app, app.performAI(prompt)
 				}
 			case models.ModelManagementMode:
-				// Download model
-				return app, app.handleModelAction("download")
+				// Show model info
+				return app, app.showModelInfo()
 			case models.ModelSelectionMode:
 				// Select model for current chat
 				return app, app.handleModelSelection()
@@ -238,7 +248,7 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "ctrl+h":
 				// Show chat history
-				if app.model.Mode == models.ChatMode || app.model.Mode == models.CommandMode {
+				if app.model.Mode == models.ChatMode {
 					return app, app.showChatHistory()
 				}
 			}
@@ -252,8 +262,8 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return app, app.handleModelAction("clean")
 				case "r":
 					return app, app.handleModelAction("restart")
-				case "i", "info":
-					return app, app.showModelInfo()
+				case "i":
+					return app, app.handleModelAction("download")
 				}
 			}
 		}
@@ -310,10 +320,10 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		
 	case models.ModelProgressMsg:
-		// Update progress in model manager view
+		// Skip updating model manager view - we only want bottom indicator
 		if msg.Progress != nil {
-			// Update the model manager with progress
-			app.modelManagerView.UpdateProgress(msg.Progress.Model, msg.Progress.Percent, msg.Progress.Downloaded, msg.Progress.Total)
+			// Force a UI refresh by returning a nil command (this triggers re-render)
+			return app, nil
 		}
 		
 	case models.ModelPulledMsg:
@@ -329,21 +339,39 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Check progress for the specific model
 		progress := app.ollama.GetProgress(msg.Model)
 		if progress != nil {
-			// Update progress in UI
-			app.modelManagerView.UpdateProgress(msg.Model, progress.Percent, progress.Downloaded, progress.Total)
+			// Update model manager view with progress
+			app.modelManagerView.UpdateProgressWithStats(
+				msg.Model, 
+				progress.Percent, 
+				progress.Downloaded, 
+				progress.Total,
+				progress.Speed,
+				progress.ETA,
+			)
 			
 			// Check if download is complete
 			if progress.Percent >= 100 || progress.Status == "Download complete" {
 				// Download complete - refresh model states immediately (no duplicate message)
 				return app, app.refreshModelStates()
+			} else if strings.Contains(progress.Status, "failed") || strings.Contains(progress.Status, "error") {
+				// Download failed - show error and stop tracking
+				app.chatView.AddMessage("system", fmt.Sprintf("Download failed for %s: %s", msg.Model, progress.Status))
+				return app, app.refreshModelStates()
 			} else {
-				// Continue ticking if still downloading
-				return app, app.startProgressTracking(msg.Model)
+				// Continue ticking if still downloading and force UI refresh
+				return app, tea.Batch(
+					app.startProgressTracking(msg.Model),
+					func() tea.Msg { return nil }, // Force refresh
+				)
 			}
 		} else {
-			// No progress found - model might be complete or failed
-			// Refresh to get current state
-			return app, app.refreshModelStates()
+			// No progress found - check if Ollama is running
+			if !app.ollama.IsRunning() {
+				app.chatView.AddMessage("system", fmt.Sprintf("Cannot download %s: Ollama is not running", msg.Model))
+				return app, app.refreshModelStates()
+			}
+			// Continue tracking for a bit longer in case download is starting
+			return app, app.startProgressTracking(msg.Model)
 		}
 		
 	case models.ModelInfoMsg:
@@ -363,6 +391,24 @@ func (app *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			historyText := app.chatView.FormatCopyHistory()
 			app.chatView.AddMessage("system", historyText)
 		}
+		
+	case ui.ImageGenerationStartedMsg:
+		// Handle image generation start
+		return app, app.generateImage(msg.Model, msg.Prompt, msg.Parameters)
+		
+	case ui.ImageGeneratedMsg:
+		// Pass to image generator view
+		app.imageGeneratorView, cmd = app.imageGeneratorView.Update(msg)
+		cmds = append(cmds, cmd)
+		
+	case ui.ImageSavedMsg:
+		// Show save result in chat
+		if msg.Err != nil {
+			app.chatView.AddMessage("system", fmt.Sprintf("Failed to save image: %v", msg.Err))
+		} else {
+			app.chatView.AddMessage("system", fmt.Sprintf("Image saved to: %s", msg.Path))
+		}
+		
 	}
 
 	// Update input
@@ -382,8 +428,6 @@ func (app *Application) View() string {
 
 	// Render based on mode
 	switch app.model.Mode {
-	case models.CommandMode:
-		content = app.renderCommandMode()
 	case models.ChatMode:
 		content = app.renderChatMode()
 	case models.ModelManagementMode:
@@ -398,6 +442,8 @@ func (app *Application) View() string {
 		content = app.renderConfirmationMode()
 	case models.ModelInfoMode:
 		content = app.renderModelInfoMode()
+	case models.ImageGenerationMode:
+		content = app.renderImageGenerationMode()
 	}
 
 	return content
@@ -417,53 +463,6 @@ func (app *Application) renderSeparator() string {
 		Render(strings.Repeat("─", width))
 }
 
-// renderCommandMode renders the command mode interface
-func (app *Application) renderCommandMode() string {
-	var s string
-
-	// Clean header
-	header := lipgloss.JoinHorizontal(lipgloss.Left,
-		lipgloss.NewStyle().
-			Foreground(lipgloss.Color("12")).
-			Bold(true).
-			Render("TRMS"),
-		lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")).
-			Render(" │ "),
-		lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
-			Render("Command Mode"),
-	)
-	s += header + "\n"
-	
-	// Subtle separator
-	s += app.renderSeparator() + "\n\n"
-
-	// Clean input area with prompt
-	inputArea := lipgloss.JoinHorizontal(lipgloss.Left,
-		lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10")).
-			Bold(true).
-			Render("$ "),
-		app.model.Input.View(),
-	)
-	
-	// Wrap input in clean border
-	styledInput := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		Padding(0, 1).
-		Render(inputArea)
-	s += styledInput + "\n\n"
-
-	// Clean help
-	help := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("243")).
-		Render("Tab: Chat Mode • Ctrl+M: Model Manager • 'help' for commands")
-	s += help
-
-	return s
-}
 
 // renderChatMode renders the chat mode interface
 func (app *Application) renderChatMode() string {
@@ -513,11 +512,11 @@ func (app *Application) renderChatMode() string {
 	// Responsive help text based on screen width
 	var helpText string
 	if app.width > 120 {
-		helpText = "Tab: Command Mode • Ctrl+S: Switch Model • Click 📋 to copy • Ctrl+P: History"
+		helpText = "/help: Commands • Ctrl+M: Models • Ctrl+S: Switch Model • Click 📋 to copy • Ctrl+P: History"
 	} else if app.width > 80 {
-		helpText = "Tab: Command • Ctrl+S: Switch • 📋 Copy • Ctrl+P: History"
+		helpText = "/help: Commands • Ctrl+M: Models • Ctrl+S: Switch • 📋 Copy • Ctrl+P: History"
 	} else {
-		helpText = "Tab: Cmd • Ctrl+S: Switch • 📋 Copy"
+		helpText = "/help • Ctrl+M: Models • Ctrl+S: Switch • 📋 Copy"
 	}
 	
 	help := lipgloss.NewStyle().
@@ -578,20 +577,25 @@ func (app *Application) renderModelManagementMode() string {
 	// Model manager view
 	s += app.modelManagerView.View() + "\n"
 
-	// Download queue status
-	queueInfo := app.getQueueStatus()
-	if queueInfo != "" {
-		queue := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243")).
-			Render("📥 " + queueInfo)
-		s += "\n" + queue + "\n"
-	}
 
 	// Clean help
 	help := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("243")).
 		Render("Enter: Download • Tab/T: Categories • d: Delete • c: Clean • r: Restart • i: Info • ESC: Back")
 	s += help
+
+	// Simple bottom download status - check directly from Ollama
+	activeDownloads := app.ollama.GetActiveDownloads()
+	if len(activeDownloads) > 0 {
+		for model, progress := range activeDownloads {
+			downloadStatus := fmt.Sprintf("%s (%d%%)", model, progress.Percent)
+			s += "\n\n" + lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Bold(true).
+				Render("⬇ Downloading: " + downloadStatus)
+			break // Only show the first one
+		}
+	}
 
 	return s
 }
@@ -696,37 +700,52 @@ func (app *Application) renderChatListMode() string {
 	// TODO: Implement chat list view
 	s += "Chat history browser coming soon...\n"
 	s += "Use Ctrl+N to create a new chat\n"
-	s += "Press ESC to return to command mode\n"
+	s += "Press ESC to return to chat mode\n"
 
 	return s
 }
 
-// handleCommand processes command input
-func (app *Application) handleCommand(input string) tea.Cmd {
+
+// handleSlashCommand processes slash commands from chat mode
+func (app *Application) handleSlashCommand(input string) tea.Cmd {
 	switch input {
 	case "q", "quit", "exit":
 		return tea.Quit
-	case "chat", "c":
-		app.model.Mode = models.ChatMode
-		currentModel := app.ollama.GetCurrentModel()
-		if currentModel == "No model selected" || currentModel == "" {
-			app.model.Input.Placeholder = "Message assistant... (No model selected)"
-		} else {
-			app.model.Input.Placeholder = fmt.Sprintf("Chat with %s", currentModel)
-		}
-		return nil
 	case "models", "m":
 		app.model.Mode = models.ModelManagementMode
 		return app.refreshModelStates()
+	case "image", "img", "generate":
+		app.model.Mode = models.ImageGenerationMode
+		// Set current model if it's an image generation model
+		currentModel := app.ollama.GetCurrentModel()
+		if app.imageGenerator.IsImageGenerationModel(currentModel) {
+			app.imageGeneratorView.SetCurrentModel(currentModel)
+		}
+		return nil
 	case "install-ollama":
 		// Install Ollama directly from TRMS
 		return app.installOllama()
+	case "status":
+		// Show container status
+		return app.showContainerStatus()
+	case "restart-containers":
+		// Restart all containers
+		return app.restartContainers()
+	case "logs":
+		// Show container logs
+		return app.showContainerLogs()
+	case "reset":
+		// Reset containers
+		return app.resetContainers()
+	case "deps", "dependencies":
+		// Check dependencies
+		return app.checkDependencies()
 	case "help", "h", "?":
 		// Show help
 		return app.showHelp()
 	default:
 		// Show unknown command message
-		app.chatView.AddMessage("system", fmt.Sprintf("Unknown command: '%s'. Type 'help' for available commands.", input))
+		app.chatView.AddMessage("system", fmt.Sprintf("Unknown command: '/%s'. Type '/help' for available commands.", input))
 		return nil
 	}
 }
@@ -793,42 +812,19 @@ Then restart TRMS.`, err))
 		} else {
 			// Ollama is running, refresh models
 			app.ollama.RefreshModels()
-			// Don't add a message here - it's running fine
+			
+			// Check if no models are installed and auto-switch to model manager
+			installedModels := app.ollama.GetModels()
+			if len(installedModels) == 0 {
+				// No models installed, switch to model manager
+				app.model.Mode = models.ModelManagementMode
+				app.chatView.AddMessage("system", "👋 Welcome to TRMS! No models found. Please download a model to start chatting.")
+			}
 		}
 		return nil
 	}
 }
 
-// checkAndStartDatabase checks if the database container is running and starts it if needed
-func checkAndStartDatabase() error {
-	db := services.NewDatabaseService()
-	
-	// Check if Docker is installed
-	if !db.IsDockerInstalled() {
-		return fmt.Errorf("Docker is not installed. Please install Docker to use database features")
-	}
-	
-	// Check if PostgreSQL container is running
-	if !db.IsPostgresRunning() {
-		fmt.Println("PostgreSQL container is not running. Starting it now...")
-		if err := db.SetupPostgres(); err != nil {
-			return fmt.Errorf("failed to start PostgreSQL container: %v", err)
-		}
-		fmt.Println("PostgreSQL container started successfully.")
-	}
-	
-	// Connect to the database
-	fmt.Println("Connecting to database...")
-	if err := db.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to database: %v", err)
-	}
-	fmt.Println("Database connected successfully.")
-	
-	// Keep the connection for later use
-	db.Disconnect() // Disconnect for now, will reconnect when needed
-	
-	return nil
-}
 
 // Professional styles
 var (
@@ -906,16 +902,31 @@ func (app *Application) handleModelAction(action string) tea.Cmd {
 		// Get selected item from model manager
 		selected := app.modelManagerView.GetSelectedModel()
 		if selected == nil {
-			return nil
+			return models.AIResponseMsg{
+				Response: "",
+				Err:      fmt.Errorf("No valid model selected. Please select a model to %s", action),
+			}
 		}
 
 		item := *selected
+		// This check should now be redundant due to GetSelectedModel safety check
 		if item.IsHeader || item.IsSeparator {
-			return nil
+			return models.AIResponseMsg{
+				Response: "",
+				Err:      fmt.Errorf("Cannot %s a header or separator. Please select a model", action),
+			}
 		}
 
 		switch action {
 		case "download":
+			// Check if Ollama is running
+			if !app.ollama.IsRunning() {
+				return models.AIResponseMsg{
+					Response: "",
+					Err:      fmt.Errorf("Ollama is not running. Please start Ollama first with 'ollama serve'"),
+				}
+			}
+			
 			// Check if already downloading
 			if item.State == services.ModelStateDownloading {
 				return models.AIResponseMsg{
@@ -944,19 +955,13 @@ func (app *Application) handleModelAction(action string) tea.Cmd {
 					break
 				}
 			}
-			// Start pulling the model in background
-			go func(modelName string) {
-				err := app.ollama.PullModel(modelName)
-				// Note: In a proper implementation, we'd need to send this error
-				// back to the main UI thread using a channel or similar mechanism
-				_ = err
-			}(item.Name)
+			// Skip updating model manager UI - we only want bottom indicator
 			
-			// Immediately update the UI to show download starting
-			app.modelManagerView.SetModelDownloading(item.Name)
+			// Show download starting message
+			app.chatView.AddMessage("system", fmt.Sprintf("Starting download of %s...", item.Name))
 			
-			// Start progress tracking
-			return app.startProgressTracking(item.Name)()
+			// Return command that starts the download (progress tracking will start after download setup)
+			return app.startModelDownload(item.Name)
 
 		case "delete":
 			if item.State == services.ModelStateComplete {
@@ -1137,9 +1142,26 @@ func (app *Application) getQueueStatus() string {
 	return fmt.Sprintf("%d models downloading", len(activeDownloads))
 }
 
+// startModelDownload starts downloading a model
+func (app *Application) startModelDownload(modelName string) tea.Cmd {
+	// Mark model as downloading in UI immediately
+	app.modelManagerView.SetModelDownloading(modelName)
+	
+	// Start the download in background
+	go func() {
+		err := app.ollama.PullModel(modelName)
+		if err != nil {
+			// Error will be shown through progress tracking
+		}
+	}()
+	
+	// Start progress tracking immediately
+	return app.startProgressTracking(modelName)
+}
+
 // startProgressTracking starts tracking progress for a model download
 func (app *Application) startProgressTracking(modelName string) tea.Cmd {
-	return tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return models.ProgressTickMsg{Model: modelName}
 	})
 }
@@ -1334,6 +1356,32 @@ func (app *Application) renderModelInfoMode() string {
 	return s
 }
 
+// renderImageGenerationMode renders the image generation interface
+func (app *Application) renderImageGenerationMode() string {
+	return app.imageGeneratorView.View()
+}
+
+// generateImage generates an image using the specified model and parameters
+func (app *Application) generateImage(model, prompt string, params ui.ImageGenerationParams) tea.Cmd {
+	return func() tea.Msg {
+		// Convert UI params to service params
+		serviceParams := services.GenerationParameters{
+			Steps:    params.Steps,
+			Guidance: params.Guidance,
+			Width:    params.Width,
+			Height:   params.Height,
+		}
+		
+		// Generate image using the service
+		imagePath, err := app.imageGenerator.GenerateImage(model, prompt, serviceParams)
+		
+		return ui.ImageGeneratedMsg{
+			ImagePath: imagePath,
+			Err:       err,
+		}
+	}
+}
+
 // installOllama installs Ollama on the system
 func (app *Application) installOllama() tea.Cmd {
 	return func() tea.Msg {
@@ -1370,23 +1418,32 @@ func (app *Application) showHelp() tea.Cmd {
 	return func() tea.Msg {
 		helpText := `📚 TRMS - Terminal Resource Management Studio
 
-🔧 Navigation:
-  chat, c          - Enter chat mode
-  models, m        - Open model manager (90+ models available!)
-  Tab              - Toggle between command and chat mode
-  Ctrl+C           - Quit
+🔧 Slash Commands (type in chat):
+  /models, /m         - Open model manager (90+ models available!)
+  /image, /img        - Enter image generation mode
+  /install-ollama     - Install Ollama
+  /status             - Show container status
+  /restart-containers - Restart all containers
+  /logs               - Show container logs
+  /reset              - Reset all containers and volumes
+  /deps               - Check system dependencies
+  /quit, /q           - Exit application
+  /help, /h           - Show this help
 
-💬 Chat Mode:
+💬 Chat Mode (default):
+  Ctrl+M           - Model manager shortcut
   Ctrl+S           - Switch model
   Ctrl+N           - New chat
   Ctrl+H           - Show chat history
   Ctrl+P           - Show copy history
+  Ctrl+C           - Quit
 
 🤖 Model Manager (90+ Models Available):
   ⚡ Lightweight    - phi, tinyllama, orca-mini (2-4GB RAM)
   🤖 General       - llama3.2, mistral, qwen2.5 (4-8GB RAM)  
   💻 Programming   - codellama, deepseek-coder, magicoder
   👁️ Vision        - llava, moondream, llama3.2-vision
+  🎨 Image Gen     - stable-diffusion, flux, sdxl, playground-v2.5
   🧮 Mathematics   - mathstral, qwen2-math, deepseek-math
   🌍 Multilingual  - aya (101 languages), command-r
   🔗 Embeddings    - nomic-embed-text, mxbai-embed-large
@@ -1394,16 +1451,29 @@ func (app *Application) showHelp() tea.Cmd {
   🎯 Specialized   - Medical, SQL, and domain-specific models
 
 📋 Model Manager Keys:
-  Enter            - Download/select model
+  i                - Install/download model
+  Enter            - Show model information
   d                - Delete model
   c                - Clean partial download
   r                - Resume/restart download
-  i                - Show model info
   R                - Refresh model list
 
+🎨 Image Generation:
+  Enter            - Generate image from prompt
+  s                - Save current image to Downloads
+  d                - Delete current image
+  ←/→              - Navigate between images
+  ESC              - Return to chat mode
+
+🐳 Container Management:
+  All services run in Docker containers for better isolation and management
+  PostgreSQL: Database for chat history and metadata
+  Ollama: AI model serving engine
+  
 🚀 Quick Start:
-  install-ollama   - Install Ollama (Linux: curl -fsSL ollama.com/install.sh | sh)
-  help, h, ?       - Show this help
+  /install-ollama  - Install Ollama (Linux: curl -fsSL ollama.com/install.sh | sh)
+  /status          - Check system status
+  /help            - Show this help
 
 All models are organized by category and memory requirements!`
 
@@ -1412,18 +1482,203 @@ All models are organized by category and memory requirements!`
 	}
 }
 
+// showContainerStatus shows the status of all containers
+func (app *Application) showContainerStatus() tea.Cmd {
+	return func() tea.Msg {
+		containerManager := services.NewContainerManager()
+		statuses := containerManager.GetAllContainerStatuses()
+		
+		statusText := "🐳 Container Status:\n\n"
+		
+		for name, status := range statuses {
+			emoji := "❌"
+			if status.Running {
+				emoji = "✅"
+			} else if status.Exists {
+				emoji = "⏸️"
+			}
+			
+			statusText += fmt.Sprintf("%s %s:\n", emoji, strings.ToUpper(name))
+			statusText += fmt.Sprintf("  Exists: %v\n", status.Exists)
+			statusText += fmt.Sprintf("  Running: %v\n", status.Running)
+			if status.Status != "" {
+				statusText += fmt.Sprintf("  Status: %s\n", status.Status)
+			}
+			if status.Health != "" {
+				statusText += fmt.Sprintf("  Health: %s\n", status.Health)
+			}
+			if len(status.Ports) > 0 {
+				statusText += fmt.Sprintf("  Ports: %s\n", strings.Join(status.Ports, ", "))
+			}
+			statusText += "\n"
+		}
+		
+		app.chatView.AddMessage("system", statusText)
+		return nil
+	}
+}
+
+// restartContainers restarts all containers
+func (app *Application) restartContainers() tea.Cmd {
+	return func() tea.Msg {
+		containerManager := services.NewContainerManager()
+		
+		app.chatView.AddMessage("system", "🔄 Restarting all containers...")
+		
+		// Restart containers
+		if err := containerManager.RestartContainer("trms-postgres"); err != nil {
+			app.chatView.AddMessage("system", fmt.Sprintf("❌ Failed to restart PostgreSQL: %v", err))
+		} else {
+			app.chatView.AddMessage("system", "✅ PostgreSQL restarted")
+		}
+		
+		if err := containerManager.RestartContainer("trms-ollama"); err != nil {
+			app.chatView.AddMessage("system", fmt.Sprintf("❌ Failed to restart Ollama: %v", err))
+		} else {
+			app.chatView.AddMessage("system", "✅ Ollama restarted")
+		}
+		
+		return nil
+	}
+}
+
+// showContainerLogs shows logs from containers
+func (app *Application) showContainerLogs() tea.Cmd {
+	return func() tea.Msg {
+		containerManager := services.NewContainerManager()
+		
+		// Show PostgreSQL logs
+		if logs, err := containerManager.GetContainerLogs("trms-postgres", 10); err == nil {
+			app.chatView.AddMessage("system", fmt.Sprintf("📋 PostgreSQL Logs (last 10 lines):\n%s", logs))
+		} else {
+			app.chatView.AddMessage("system", fmt.Sprintf("❌ Failed to get PostgreSQL logs: %v", err))
+		}
+		
+		// Show Ollama logs
+		if logs, err := containerManager.GetContainerLogs("trms-ollama", 10); err == nil {
+			app.chatView.AddMessage("system", fmt.Sprintf("📋 Ollama Logs (last 10 lines):\n%s", logs))
+		} else {
+			app.chatView.AddMessage("system", fmt.Sprintf("❌ Failed to get Ollama logs: %v", err))
+		}
+		
+		return nil
+	}
+}
+
+// resetContainers resets all containers and volumes
+func (app *Application) resetContainers() tea.Cmd {
+	return func() tea.Msg {
+		containerManager := services.NewContainerManager()
+		
+		app.chatView.AddMessage("system", "🔄 Resetting all containers and volumes...")
+		app.chatView.AddMessage("system", "⚠️  This will delete all chat history and downloaded models!")
+		
+		// Remove containers
+		containerManager.RemoveContainer("trms-postgres")
+		containerManager.RemoveContainer("trms-ollama")
+		
+		// Remove volumes
+		exec.Command("docker", "volume", "rm", "trms_postgres_data").Run()
+		exec.Command("docker", "volume", "rm", "trms_ollama").Run()
+		
+		app.chatView.AddMessage("system", "✅ Containers and volumes reset successfully!")
+		app.chatView.AddMessage("system", "Use /restart-containers to recreate them.")
+		
+		return nil
+	}
+}
+
+// checkDependencies checks system dependencies
+func (app *Application) checkDependencies() tea.Cmd {
+	return func() tea.Msg {
+		depManager := services.NewDependencyManager()
+		
+		app.chatView.AddMessage("system", "🔍 Checking system dependencies...")
+		
+		// Check Docker
+		if depManager.IsDockerInstalled() {
+			if depManager.IsDockerRunning() {
+				app.chatView.AddMessage("system", "✅ Docker: Installed and running")
+			} else {
+				app.chatView.AddMessage("system", "⚠️  Docker: Installed but not running")
+			}
+		} else {
+			app.chatView.AddMessage("system", "❌ Docker: Not installed")
+		}
+		
+		// Check other dependencies
+		deps := map[string]func() bool{
+			"curl": depManager.IsCurlInstalled,
+			"git":  depManager.IsGitInstalled,
+		}
+		
+		for name, checker := range deps {
+			if checker() {
+				app.chatView.AddMessage("system", fmt.Sprintf("✅ %s: Installed", name))
+			} else {
+				app.chatView.AddMessage("system", fmt.Sprintf("❌ %s: Not installed", name))
+			}
+		}
+		
+		app.chatView.AddMessage("system", "\nUse /deps to install missing dependencies")
+		
+		return nil
+	}
+}
+
 func main() {
+	var (
+		showVersion    = flag.Bool("version", false, "Show version information")
+		showStatus     = flag.Bool("status", false, "Show container status and exit")
+		skipChecks     = flag.Bool("skip-checks", false, "Skip startup dependency checks")
+		resetContainers = flag.Bool("reset", false, "Reset all containers and volumes")
+		debugMode      = flag.Bool("debug", false, "Enable debug mode")
+	)
 	flag.Parse()
 
-	// Check and start database before starting the application
-	if err := checkAndStartDatabase(); err != nil {
-		fmt.Printf("Database initialization error: %v\n", err)
-		fmt.Println("The application will continue without database features.")
-		// Continue running the app even if database fails
+	if *showVersion {
+		fmt.Println("TRMS (Terminal Resource Management Studio) v1.0.0")
+		fmt.Println("Enhanced with dependency management and containerization")
+		return
+	}
+
+	containerManager := services.NewContainerManager()
+
+	if *showStatus {
+		containerManager.ShowStatus()
+		return
+	}
+
+	if *resetContainers {
+		fmt.Println("🔄 Resetting all TRMS containers...")
+		containerManager.RemoveContainer("trms-postgres")
+		containerManager.RemoveContainer("trms-ollama")
+		
+		// Remove volumes
+		exec.Command("docker", "volume", "rm", "trms_postgres_data").Run()
+		exec.Command("docker", "volume", "rm", "trms_ollama").Run()
+		
+		fmt.Println("✅ Containers and volumes reset successfully!")
+		return
+	}
+
+	if !*skipChecks {
+		// Perform startup checks
+		if err := containerManager.StartupCheck(); err != nil {
+			fmt.Printf("Startup check failed: %v\n", err)
+			fmt.Println("Use --skip-checks to bypass this check.")
+			fmt.Println("Some features may be limited. Continuing...")
+		}
 	}
 
 	// Create and run the application
 	app := New()
+	
+	if *debugMode {
+		fmt.Println("🐛 Debug mode enabled")
+		app.model.DebugMode = true
+	}
+
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	if _, err := p.Run(); err != nil {

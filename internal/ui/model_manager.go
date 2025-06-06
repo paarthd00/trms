@@ -2,10 +2,10 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,14 +15,22 @@ import (
 	"trms/internal/services"
 )
 
+// ProgressExtras stores additional progress information
+type ProgressExtras struct {
+	Speed string
+	ETA   string
+}
+
 // ModelManagerView handles model management UI
 type ModelManagerView struct {
-	viewport     viewport.Model
-	width        int
-	height       int
-	focused      bool
-	showDetails  bool
-	modelStates  map[string]*services.ModelStatus
+	list        list.Model
+	viewport    viewport.Model
+	width       int
+	height      int
+	focused     bool
+	showDetails bool
+	modelStates map[string]*services.ModelStatus
+	progressExtras map[string]ProgressExtras // Speed and ETA data
 	
 	// Filtering and search
 	categories         map[string]models.ModelCategory
@@ -62,8 +70,8 @@ func (i ModelManagerItem) Title() string {
 		return SeparatorStyle.Render("────────────────────────────────────────")
 	}
 
-	// Status icon and progress based on state
-	var status, progressBar string
+	// Status icon based on state
+	var status string
 	switch i.State {
 	case services.ModelStateComplete:
 		if i.IsCurrent {
@@ -72,27 +80,17 @@ func (i ModelManagerItem) Title() string {
 			status = "✓" // Clean checkmark
 		}
 	case services.ModelStateDownloading:
-		status = fmt.Sprintf("↓ %d%%", i.Percent)
-		progressBar = renderProgressBar(i.Percent, 20, "█", "░")
+		status = "↓"
 	case services.ModelStatePartial:
-		status = fmt.Sprintf("⚠ %d%%", i.Percent)
-		progressBar = renderProgressBar(i.Percent, 20, "█", "░")
+		status = "⚠"
 	case services.ModelStateCorrupted:
 		status = "✗"
 	default:
 		status = "○"
 	}
 
-	// Size info with better formatting
-	var sizeInfo string
-	if i.State == services.ModelStatePartial || i.State == services.ModelStateDownloading {
-		sizeInfo = fmt.Sprintf("%s / %s", formatBytes(i.Downloaded), formatBytes(i.Size))
-		if progressBar != "" {
-			sizeInfo += fmt.Sprintf("\n    %s", progressBar)
-		}
-	} else {
-		sizeInfo = formatBytes(i.Size)
-	}
+	// Size info 
+	sizeInfo := formatBytes(i.Size)
 
 	return fmt.Sprintf("%s %-25s %s", status, i.Name, sizeInfo)
 }
@@ -105,22 +103,32 @@ func (i ModelManagerItem) Description() string {
 	switch i.State {
 	case services.ModelStateComplete:
 		if i.IsCurrent {
-			return "Currently active model"
+			return "Currently active model • Press 'i' to reinstall"
 		} else {
-			return "Ready to use • Press Enter to switch"
+			return "Ready to use • Press 'i' to reinstall"
 		}
 	case services.ModelStateDownloading:
-		desc := fmt.Sprintf("Downloading %d%%", i.Percent)
-		if i.Speed != "" && i.ETA != "" {
-			desc += fmt.Sprintf(" • %s • ETA: %s", i.Speed, i.ETA)
+		if i.Percent > 0 {
+			progressBar := renderProgressBar(i.Percent, 30)
+			speedETA := ""
+			if i.Speed != "" && i.ETA != "" {
+				speedETA = fmt.Sprintf(" • %s • ETA: %s", i.Speed, i.ETA)
+			} else if i.Speed != "" {
+				speedETA = fmt.Sprintf(" • %s", i.Speed)
+			}
+			return fmt.Sprintf("Downloading %s %d%%%s", progressBar, i.Percent, speedETA)
 		}
-		return desc
+		return "Starting download..."
 	case services.ModelStatePartial:
-		return fmt.Sprintf("Partial download %d%% • Press Enter to resume or 'c' to clean", i.Percent)
+		if i.Percent > 0 {
+			progressBar := renderProgressBar(i.Percent, 30)
+			return fmt.Sprintf("Partial %s %d%% • Press 'r' to resume or 'c' to clean", progressBar, i.Percent)
+		}
+		return "Partial download • Press 'r' to resume or 'c' to clean"
 	case services.ModelStateCorrupted:
 		return fmt.Sprintf("Corrupted: %s • Press 'c' to clean", i.Error)
 	default:
-		return "Available for download • Press Enter to start"
+		return "Available for download • Press 'i' to install"
 	}
 }
 
@@ -151,8 +159,8 @@ type modelManagerKeyMap struct {
 
 var modelManagerKeys = modelManagerKeyMap{
 	Download: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("Enter", "download"),
+		key.WithKeys("i"),
+		key.WithHelp("i", "install/download"),
 	),
 	Delete: key.NewBinding(
 		key.WithKeys("d", "delete"),
@@ -171,8 +179,8 @@ var modelManagerKeys = modelManagerKeyMap{
 		key.WithHelp("R/F5", "refresh"),
 	),
 	Details: key.NewBinding(
-		key.WithKeys("i"),
-		key.WithHelp("i", "show details"),
+		key.WithKeys("enter"),
+		key.WithHelp("Enter", "show info"),
 	),
 	Cancel: key.NewBinding(
 		key.WithKeys("ctrl+c", "ctrl+g"),
@@ -291,13 +299,9 @@ func (m ModelManagerView) Update(msg tea.Msg) (ModelManagerView, tea.Cmd) {
 				m.prevCategory()
 				m.updateFilteredModels()
 			case key.Matches(msg, modelManagerKeys.Up):
-				if m.selectedIndex > 0 {
-					m.selectedIndex--
-				}
+				m.navigateUp()
 			case key.Matches(msg, modelManagerKeys.Down):
-				if m.selectedIndex < len(m.filteredModels)-1 {
-					m.selectedIndex++
-				}
+				m.navigateDown()
 			case key.Matches(msg, modelManagerKeys.Details):
 				m.showDetails = !m.showDetails
 				if m.showDetails {
@@ -324,7 +328,12 @@ func (m ModelManagerView) Update(msg tea.Msg) (ModelManagerView, tea.Cmd) {
 // GetSelectedModel returns the currently selected model
 func (m *ModelManagerView) GetSelectedModel() *ModelManagerItem {
 	if m.selectedIndex >= 0 && m.selectedIndex < len(m.filteredModels) {
-		return &m.filteredModels[m.selectedIndex]
+		item := &m.filteredModels[m.selectedIndex]
+		// Safety check: don't return headers or separators
+		if item.IsHeader || item.IsSeparator {
+			return nil
+		}
+		return item
 	}
 	return nil
 }
@@ -427,15 +436,15 @@ func (m ModelManagerView) renderHelp() string {
 		if selected != nil && !selected.IsHeader && !selected.IsSeparator {
 			switch selected.State {
 			case services.ModelStateNotInstalled:
-				helpItems = append(helpItems, "Enter: Download")
+				helpItems = append(helpItems, "i: Install/Download", "Enter: Info")
 			case services.ModelStateComplete:
-				helpItems = append(helpItems, "d: Delete")
+				helpItems = append(helpItems, "d: Delete", "Enter: Info")
 			case services.ModelStatePartial:
-				helpItems = append(helpItems, "r: Resume", "c: Clean")
+				helpItems = append(helpItems, "r: Resume", "c: Clean", "Enter: Info")
 			case services.ModelStateCorrupted:
-				helpItems = append(helpItems, "c: Clean")
+				helpItems = append(helpItems, "c: Clean", "Enter: Info")
 			case services.ModelStateDownloading:
-				helpItems = append(helpItems, "Ctrl+C: Cancel")
+				helpItems = append(helpItems, "Ctrl+C: Cancel", "Enter: Info")
 			}
 		}
 		
@@ -520,7 +529,13 @@ func (m *ModelManagerView) updateFilteredModels() {
 	var allItems []ModelManagerItem
 	processedModels := make(map[string]bool)
 	
-	// First, add all downloaded/downloading models from modelStates
+	// Organize models into categories by state
+	var downloadingModels []ModelManagerItem
+	var partialModels []ModelManagerItem
+	var installedImageModels []ModelManagerItem
+	var installedRegularModels []ModelManagerItem
+	
+	// First, process all downloaded/downloading models from modelStates
 	if m.modelStates != nil {
 		for name, status := range m.modelStates {
 			// Apply fuzzy search filter
@@ -528,7 +543,7 @@ func (m *ModelManagerView) updateFilteredModels() {
 				continue
 			}
 			
-			// For category filtering, we need to check if this model belongs to the category
+			// For category filtering, check if this model belongs to the category
 			shouldInclude := m.currentCategory == "all"
 			if !shouldInclude {
 				// Check if the model is in the current category from JSON
@@ -553,6 +568,13 @@ func (m *ModelManagerView) updateFilteredModels() {
 			}
 			
 			if shouldInclude {
+				// Get speed and ETA from progress extras
+				var speed, eta string
+				if extras, exists := m.progressExtras[name]; exists {
+					speed = extras.Speed
+					eta = extras.ETA
+				}
+				
 				item := ModelManagerItem{
 					Name:       name,
 					State:      status.State,
@@ -560,14 +582,30 @@ func (m *ModelManagerView) updateFilteredModels() {
 					Downloaded: status.Downloaded,
 					Percent:    status.Percent,
 					Error:      status.Error,
+					Speed:      speed,
+					ETA:        eta,
 				}
-				allItems = append(allItems, item)
+				
+				// Categorize by state
+				switch status.State {
+				case services.ModelStateDownloading:
+					downloadingModels = append(downloadingModels, item)
+				case services.ModelStatePartial:
+					partialModels = append(partialModels, item)
+				case services.ModelStateComplete:
+					if isImageGenerationModel(name) {
+						installedImageModels = append(installedImageModels, item)
+					} else {
+						installedRegularModels = append(installedRegularModels, item)
+					}
+				}
+				
 				processedModels[name] = true
 			}
 		}
 	}
 	
-	// Then add available models from JSON that haven't been processed yet
+	// Then process available models from JSON that haven't been downloaded
 	var modelsToShow []models.ModelInfo
 	if m.currentCategory == "all" {
 		modelsToShow = m.allModels
@@ -593,7 +631,8 @@ func (m *ModelManagerView) updateFilteredModels() {
 		}
 	}
 	
-	// Convert to ModelManagerItems and apply search filter
+	// Convert available models to items and apply search filter
+	var availableModels []ModelManagerItem
 	for _, model := range modelsToShow {
 		// Skip if already processed from modelStates
 		if processedModels[model.Name] {
@@ -617,25 +656,130 @@ func (m *ModelManagerView) updateFilteredModels() {
 			Size:  size,
 		}
 		
-		allItems = append(allItems, item)
+		availableModels = append(availableModels, item)
 	}
 	
-	// Sort by priority: downloading > partial > installed > available
-	sort.Slice(allItems, func(i, j int) bool {
-		priority := func(state services.ModelState) int {
-			switch state {
-			case services.ModelStateDownloading:
-				return 0
-			case services.ModelStatePartial:
-				return 1
-			case services.ModelStateComplete:
-				return 2
-			default:
-				return 3
+	// Build the final list with clear sections
+	
+	// 1. Active downloads (highest priority)
+	if len(downloadingModels) > 0 {
+		allItems = append(allItems, ModelManagerItem{
+			Name:     fmt.Sprintf("📥 DOWNLOADING (%d)", len(downloadingModels)),
+			IsHeader: true,
+		})
+		allItems = append(allItems, downloadingModels...)
+		allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+	}
+	
+	// 2. Partial downloads
+	if len(partialModels) > 0 {
+		allItems = append(allItems, ModelManagerItem{
+			Name:     fmt.Sprintf("⚠️ PARTIAL DOWNLOADS (%d)", len(partialModels)),
+			IsHeader: true,
+		})
+		allItems = append(allItems, partialModels...)
+		allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+	}
+	
+	// 3. Installed image generation models (priority section)
+	if len(installedImageModels) > 0 {
+		allItems = append(allItems, ModelManagerItem{
+			Name:     fmt.Sprintf("🎨 IMAGE GENERATION MODELS (%d)", len(installedImageModels)),
+			IsHeader: true,
+		})
+		allItems = append(allItems, installedImageModels...)
+		allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+	}
+	
+	// 4. Other installed models
+	if len(installedRegularModels) > 0 {
+		allItems = append(allItems, ModelManagerItem{
+			Name:     fmt.Sprintf("✅ INSTALLED MODELS (%d)", len(installedRegularModels)),
+			IsHeader: true,
+		})
+		allItems = append(allItems, installedRegularModels...)
+		allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+	}
+	
+	// 5. Available models (image generation first, then by category)
+	if len(availableModels) > 0 {
+		// Separate image generation models from regular models
+		var availableImageModels []ModelManagerItem
+		var availableRegularModels []ModelManagerItem
+		
+		for _, item := range availableModels {
+			if isImageGenerationModel(item.Name) {
+				availableImageModels = append(availableImageModels, item)
+			} else {
+				availableRegularModels = append(availableRegularModels, item)
 			}
 		}
-		return priority(allItems[i].State) < priority(allItems[j].State)
-	})
+		
+		// Show available image generation models first
+		if len(availableImageModels) > 0 {
+			allItems = append(allItems, ModelManagerItem{
+				Name:     fmt.Sprintf("🎨 AVAILABLE IMAGE MODELS (%d)", len(availableImageModels)),
+				IsHeader: true,
+			})
+			allItems = append(allItems, availableImageModels...)
+			allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+		}
+		
+		// Then show other available models
+		if len(availableRegularModels) > 0 {
+			if m.currentCategory == "all" {
+				// Group by category when showing all
+				categoryGroups := make(map[string][]ModelManagerItem)
+				
+				for _, item := range availableRegularModels {
+					// Find the category for this model
+					category := "specialized" // default
+					for _, model := range m.allModels {
+						if model.Name == item.Name && len(model.Tags) > 0 {
+							category = model.Tags[0]
+							break
+						}
+					}
+					categoryGroups[category] = append(categoryGroups[category], item)
+				}
+				
+				// Add models by category order
+				categoryOrder := []string{"general", "small", "coding", "vision", "math", "creative", "multilingual", "embedding", "specialized"}
+				for _, categoryKey := range categoryOrder {
+					if items, exists := categoryGroups[categoryKey]; exists && len(items) > 0 {
+						if category, catExists := m.categories[categoryKey]; catExists {
+							allItems = append(allItems, ModelManagerItem{
+								Name:     fmt.Sprintf("%s %s (%d)", category.Icon, strings.ToUpper(category.Name), len(items)),
+								IsHeader: true,
+							})
+						}
+						allItems = append(allItems, items...)
+						allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+					}
+				}
+			} else {
+				// Show as a single section when filtering by category
+				if category, exists := m.categories[m.currentCategory]; exists {
+					allItems = append(allItems, ModelManagerItem{
+						Name:     fmt.Sprintf("%s AVAILABLE %s (%d)", category.Icon, strings.ToUpper(category.Name), len(availableRegularModels)),
+						IsHeader: true,
+					})
+				} else {
+					allItems = append(allItems, ModelManagerItem{
+						Name:     fmt.Sprintf("📦 AVAILABLE MODELS (%d)", len(availableRegularModels)),
+						IsHeader: true,
+					})
+				}
+				allItems = append(allItems, availableRegularModels...)
+				allItems = append(allItems, ModelManagerItem{IsSeparator: true})
+			}
+		}
+	}
+	
+	// Remove trailing separator
+	if len(allItems) > 0 && allItems[len(allItems)-1].IsSeparator {
+		allItems = allItems[:len(allItems)-1]
+	}
 	
 	m.filteredModels = allItems
 	
@@ -645,6 +789,20 @@ func (m *ModelManagerView) updateFilteredModels() {
 	}
 	if len(m.filteredModels) == 0 {
 		m.selectedIndex = 0
+		return
+	}
+	
+	// Ensure we start on a selectable item (not header or separator)
+	if m.selectedIndex < len(m.filteredModels) && 
+		(m.filteredModels[m.selectedIndex].IsHeader || m.filteredModels[m.selectedIndex].IsSeparator) {
+		// Find the first selectable item
+		for i := 0; i < len(m.filteredModels); i++ {
+			if !m.filteredModels[i].IsHeader && !m.filteredModels[i].IsSeparator {
+				m.selectedIndex = i
+				return
+			}
+		}
+		// If no selectable items found, keep current selection
 	}
 }
 
@@ -652,21 +810,6 @@ func (m *ModelManagerView) updateFilteredModels() {
 
 
 
-// renderProgressBar creates a visual progress bar
-func renderProgressBar(percent, width int, filled, empty string) string {
-	if percent < 0 {
-		percent = 0
-	}
-	if percent > 100 {
-		percent = 100
-	}
-	
-	filledWidth := (percent * width) / 100
-	emptyWidth := width - filledWidth
-	
-	bar := strings.Repeat(filled, filledWidth) + strings.Repeat(empty, emptyWidth)
-	return fmt.Sprintf("[%s] %d%%", bar, percent)
-}
 
 func parseSize(sizeStr string) int64 {
 	// Simple parser for sizes like "3.8GB", "400MB"
@@ -697,12 +840,51 @@ func parseSize(sizeStr string) int64 {
 
 // UpdateProgress updates the progress for a specific model
 func (m *ModelManagerView) UpdateProgress(modelName string, percent int, downloaded, total string) {
-	// Update the model states map if we have it
-	if m.modelStates != nil {
-		if status, exists := m.modelStates[modelName]; exists {
-			status.Percent = percent
-			status.State = services.ModelStateDownloading
+	m.UpdateProgressWithStats(modelName, percent, downloaded, total, "", "")
+}
+
+// UpdateProgressWithStats updates the progress for a specific model with speed and ETA
+func (m *ModelManagerView) UpdateProgressWithStats(modelName string, percent int, downloaded, total, speed, eta string) {
+	// Update or create the model states map entry
+	if m.modelStates == nil {
+		m.modelStates = make(map[string]*services.ModelStatus)
+	}
+	
+	if status, exists := m.modelStates[modelName]; exists {
+		status.Percent = percent
+		status.State = services.ModelStateDownloading
+		if downloaded != "" {
+			status.Downloaded = parseSize(downloaded)
 		}
+		if total != "" {
+			status.Size = parseSize(total)
+		}
+	} else {
+		// Create new status entry for models that aren't in the map yet
+		downloadedBytes := int64(0)
+		totalBytes := int64(0)
+		if downloaded != "" {
+			downloadedBytes = parseSize(downloaded)
+		}
+		if total != "" {
+			totalBytes = parseSize(total)
+		}
+		
+		m.modelStates[modelName] = &services.ModelStatus{
+			State:      services.ModelStateDownloading,
+			Percent:    percent,
+			Downloaded: downloadedBytes,
+			Size:       totalBytes,
+		}
+	}
+	
+	// Store speed and ETA separately for this model
+	if m.progressExtras == nil {
+		m.progressExtras = make(map[string]ProgressExtras)
+	}
+	m.progressExtras[modelName] = ProgressExtras{
+		Speed: speed,
+		ETA:   eta,
 	}
 	
 	// Update filtered models
@@ -711,11 +893,30 @@ func (m *ModelManagerView) UpdateProgress(modelName string, percent int, downloa
 
 // SetModelDownloading marks a model as starting to download
 func (m *ModelManagerView) SetModelDownloading(modelName string) {
-	// Update the model states map if we have it
-	if m.modelStates != nil {
-		if status, exists := m.modelStates[modelName]; exists {
-			status.State = services.ModelStateDownloading
-			status.Percent = 0
+	// Update or create the model states map entry
+	if m.modelStates == nil {
+		m.modelStates = make(map[string]*services.ModelStatus)
+	}
+	
+	if status, exists := m.modelStates[modelName]; exists {
+		status.State = services.ModelStateDownloading
+		status.Percent = 0
+	} else {
+		// Find the model size from allModels for initial display
+		var modelSize int64 = 0
+		for _, model := range m.allModels {
+			if model.Name == modelName {
+				modelSize = parseSize(model.Size)
+				break
+			}
+		}
+		
+		// Create new status entry for models that aren't in the map yet
+		m.modelStates[modelName] = &services.ModelStatus{
+			State:      services.ModelStateDownloading,
+			Percent:    0,
+			Downloaded: 0,
+			Size:       modelSize,
 		}
 	}
 	
@@ -891,8 +1092,8 @@ func (m ModelManagerView) renderModelList() string {
 			content.WriteString("\n")
 		}
 		
-		// Add description if selected
-		if i == m.selectedIndex && item.Description() != "" {
+		// Add description if selected OR if it's downloading/partial (for progress bars)
+		if (i == m.selectedIndex || item.State == services.ModelStateDownloading || item.State == services.ModelStatePartial) && item.Description() != "" {
 			content.WriteString("\n")
 			content.WriteString(fmt.Sprintf("    %s", item.Description()))
 		}
@@ -931,4 +1132,101 @@ func fuzzyMatch(text, pattern string) bool {
 	}
 	
 	return true
+}
+
+// renderProgressBar renders a visual progress bar
+func renderProgressBar(percent int, width int) string {
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	
+	filled := int(float64(width) * float64(percent) / 100.0)
+	empty := width - filled
+	
+	bar := "["
+	for i := 0; i < filled; i++ {
+		bar += "█"
+	}
+	for i := 0; i < empty; i++ {
+		bar += "░"
+	}
+	bar += "]"
+	
+	return bar
+}
+
+// isImageGenerationModel checks if a model is for image generation
+func isImageGenerationModel(modelName string) bool {
+	imageModels := []string{
+		"stable-diffusion",
+		"flux",
+		"flux-schnell", 
+		"sdxl",
+		"playground-v2.5",
+		"dreamshaper",
+	}
+	
+	modelLower := strings.ToLower(modelName)
+	for _, imgModel := range imageModels {
+		if strings.Contains(modelLower, strings.ToLower(imgModel)) {
+			return true
+		}
+	}
+	return false
+}
+
+// navigateUp moves selection up, skipping headers and separators
+func (m *ModelManagerView) navigateUp() {
+	if len(m.filteredModels) == 0 {
+		return
+	}
+	
+	// Start from current position and move up
+	newIndex := m.selectedIndex - 1
+	
+	// Find the previous selectable item
+	for newIndex >= 0 {
+		if !m.filteredModels[newIndex].IsHeader && !m.filteredModels[newIndex].IsSeparator {
+			m.selectedIndex = newIndex
+			return
+		}
+		newIndex--
+	}
+	
+	// If we can't find a selectable item above, wrap to the bottom
+	for i := len(m.filteredModels) - 1; i > m.selectedIndex; i-- {
+		if !m.filteredModels[i].IsHeader && !m.filteredModels[i].IsSeparator {
+			m.selectedIndex = i
+			return
+		}
+	}
+}
+
+// navigateDown moves selection down, skipping headers and separators
+func (m *ModelManagerView) navigateDown() {
+	if len(m.filteredModels) == 0 {
+		return
+	}
+	
+	// Start from current position and move down
+	newIndex := m.selectedIndex + 1
+	
+	// Find the next selectable item
+	for newIndex < len(m.filteredModels) {
+		if !m.filteredModels[newIndex].IsHeader && !m.filteredModels[newIndex].IsSeparator {
+			m.selectedIndex = newIndex
+			return
+		}
+		newIndex++
+	}
+	
+	// If we can't find a selectable item below, wrap to the top
+	for i := 0; i < m.selectedIndex; i++ {
+		if !m.filteredModels[i].IsHeader && !m.filteredModels[i].IsSeparator {
+			m.selectedIndex = i
+			return
+		}
+	}
 }

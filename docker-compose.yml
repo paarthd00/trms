@@ -2,6 +2,7 @@ version: '3.3'
 
 services:
   postgres:
+    container_name: trms-postgres
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: trms
@@ -10,13 +11,24 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - trms_postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trms -d trms"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  ollama:
+    container_name: trms-ollama
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - trms_ollama:/root/.ollama
+    restart: unless-stopped
 
 volumes:
-  postgres_data:
+  trms_postgres_data:
+  trms_ollama:

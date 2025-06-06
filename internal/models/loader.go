@@ -199,7 +199,8 @@ func contains(str string, substrs []string) bool {
 
 // Initialize models on package load
 func init() {
-	if loadedModels, err := LoadModelsFromJSON(); err == nil {
-		AllModels = loadedModels
-	}
+	// Use hardcoded models for now to ensure compatibility
+	// if loadedModels, err := LoadModelsFromJSON(); err == nil {
+	//	AllModels = loadedModels
+	// }
 }

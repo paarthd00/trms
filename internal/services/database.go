@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -73,14 +74,32 @@ func (d *DatabaseService) IsConnected() bool {
 	return d.isConnected && d.db != nil
 }
 
-// IsPostgresRunning checks if PostgreSQL is running
+// IsPostgresRunning checks if PostgreSQL is running (local or container)
 func (d *DatabaseService) IsPostgresRunning() bool {
-	cmd := exec.Command("docker", "ps", "--filter", "name=postgres", "--format", "{{.Names}}")
-	output, err := cmd.Output()
+	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+		d.config.Host, d.config.Port, d.config.User, d.config.Password, d.config.Database)
+	
+	// Try to connect to the database
+	conn, err := sql.Open("postgres", connectionString)
 	if err != nil {
 		return false
 	}
-	return len(output) > 0 && string(output) != ""
+	defer conn.Close()
+	
+	err = conn.Ping()
+	if err == nil {
+		return true
+	}
+	
+	// Check if running in container
+	return d.IsPostgresRunningInContainer()
+}
+
+// IsPostgresRunningInContainer checks if PostgreSQL is running in a Docker container
+func (d *DatabaseService) IsPostgresRunningInContainer() bool {
+	cmd := exec.Command("docker", "ps", "--filter", "name=trms-postgres", "--filter", "status=running", "--format", "{{.Names}}")
+	output, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(output)) == "trms-postgres"
 }
 
 // IsDockerInstalled checks if Docker is installed
